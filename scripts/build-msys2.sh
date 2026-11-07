@@ -91,6 +91,8 @@ cp "$build/sacredfire-game.exe" "$build/SacredFire.exe" "$build/bb-gpu-capabilit
 for exe in "$root"/bin/*.exe; do
     ldd "$exe" | awk '$2 == "=>" && $3 ~ /^\// {print $3}'
 done | { grep -viE '^/c/windows/' || true; } | sort -u | while read -r dll; do
+    # On a rebuild ldd finds the copies already in bin (SDL3.dll ...): nothing to copy.
+    [[ $dll -ef $root/bin/$(basename "$dll") ]] && continue
     cp -u "$dll" "$root/bin/"
 done
 printf '%s\n' "$version" > "$root/bin/VERSION"
