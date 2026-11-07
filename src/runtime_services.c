@@ -526,6 +526,11 @@ static ABI int32_t http_errno(int32_t id,int32_t *err) { (void)id; if (err) *err
 #define AUDIO3D_NOT_SUPPORTED ((int32_t)0x80EA0009)
 static ABI int32_t audio3d_unsupported(void) { return AUDIO3D_NOT_SUPPORTED; }
 
+/* NHL 19: libSceIme keyboard functions. No USB keyboard is connected (keyboard input reaches the
+ * game as pad buttons through SDL), so opening it reports exactly that. */
+#define IME_ERROR_NO_KEYBOARD ((int32_t)0x80BC0008)
+static ABI int32_t ime_no_keyboard(void) { return IME_ERROR_NO_KEYBOARD; }
+
 static const RuntimeExport exports[]={
     /* UFC 3 */
     {"sceNpWebApiCreateContextA",np_signed_out}, {"sceNpWebApiCreateHandle",lib_init_id}, {"sceNpWebApiDeleteHandle",ok_void},
@@ -660,6 +665,8 @@ static const RuntimeExport exports[]={
     {"sceNpCommerceDialogUpdateStatus",commerce_status}, {"sceNpCommerceDialogTerminate",commerce_term},
     {"sceImeDialogInit",ime_init}, {"sceImeDialogGetStatus",ime_status}, {"sceImeDialogGetResult",ime_result},
     {"sceImeDialogTerm",ime_term}, {"sceImeDialogAbort",ime_term},
+    {"sceImeKeyboardOpen",ime_no_keyboard}, {"sceImeKeyboardGetResourceId",ime_no_keyboard}, {"sceImeKeyboardGetInfo",ime_no_keyboard},
+    {"sceImeKeyboardClose",ok_void}, {"sceImeKeyboardSetMode",ok_void}, {"sceImeUpdate",ok_void},
     {"sceNpTrophyCreateContext",trophy_context}, {"sceNpTrophyCreateHandle",trophy_handle},
     {"sceNpTrophyRegisterContext",trophy_register}, {"sceNpTrophyUnlockTrophy",trophy_unlock},
     {"sceNpTrophyGetGameInfo",trophy_game_info}, {"sceNpTrophyGetTrophyInfo",trophy_info},

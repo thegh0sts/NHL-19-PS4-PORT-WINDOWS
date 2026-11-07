@@ -24,6 +24,10 @@ SUPPORTED = {
     '46c2477702ae5d3fbff3a1911f10841aa150d20941d515ffb3edec75153f055b': dict(
         name='ufc3', title='CUSA06534', version='01.14', game='EA SPORTS UFC 3', update='CUSA06534-patch',
         modules=('libc.prx', 'libSceFios2.prx'), patches=False),
+    # NHL 19 CUSA11126 (US, UP0006) 1.60, SDK 5.50: same engine family as UFC 3 (EA Sports Ignite).
+    '3ff8bd90d63536e6757d8a559a8770cf930ebb1aa2c851ed99d7ff4da763b620': dict(
+        name='nhl19', title='CUSA11126', version='01.60', game='NHL 19', update='CUSA11126-patch',
+        modules=('libc.prx', 'libSceFios2.prx'), patches=False),
 }
 BY_TITLE = {p['title']: p for p in SUPPORTED.values()}
 # Images that are known NOT to be 1.14: the base game's executable (1.00). With a 1.14 param.sfo
@@ -87,6 +91,8 @@ def sfo_info(game):
 def damaged_configs(game):
     """The CONFIG_FILES that are missing or not the plain text the game parses."""
     damaged = []
+    if sfo_info(game).get('TITLE_ID') not in (None, 'CUSA06534'):
+        return damaged  # CONFIG_FILES are UFC 3's (samplegame/...); other games keep their data elsewhere
     for name, markers in CONFIG_FILES.items():
         try:
             data = (Path(game) / name).read_bytes()
