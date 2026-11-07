@@ -65,15 +65,16 @@ if [[ $profile == nhl19 || $profile == ufc3 ]]; then
     fi
     export BB_READBACKS=${BB_READBACKS:-2} BB_READBACK_LINEAR=${BB_READBACK_LINEAR:-1} BB_GPU_WRITE_TWINS=${BB_GPU_WRITE_TWINS:-0}
     if [[ $profile == nhl19 ]]; then
-        # NHL 19: write windows/stepped writes and the background pre-upload send the players' cloth
-        # vertices to the GPU while the game is still writing them (jerseys shake; both groups must be
-        # off: either one alone still shakes). Black models without the linear readbacks above.
-        export BB_WRITE_WINDOW=${BB_WRITE_WINDOW:-0} BB_PREUPLOAD=${BB_PREUPLOAD:-0} BB_WRITE_STEP=${BB_WRITE_STEP:-0}
+        # NHL 19: write windows/stepped writes send the players' cloth vertices to the GPU while the
+        # game is still writing them (jerseys shake), so they are off. The background pre-upload stays
+        # on: without it the main menu's mode tiles are missing. Black models without the linear
+        # readbacks above.
+        export BB_WRITE_WINDOW=${BB_WRITE_WINDOW:-0} BB_PREUPLOAD=${BB_PREUPLOAD:-1} BB_WRITE_STEP=${BB_WRITE_STEP:-0}
     else
         export BB_WRITE_WINDOW=${BB_WRITE_WINDOW:-1} BB_PREUPLOAD=${BB_PREUPLOAD:-1} BB_WRITE_STEP=${BB_WRITE_STEP:-1}
     fi
     export BB_Z16S8_AS_D16=${BB_Z16S8_AS_D16:-1}
-    echo "run-msys2: Ignite graphics defaults: readbacks $BB_READBACKS, linear $BB_READBACK_LINEAR"
+    echo "run-msys2: Ignite graphics defaults: readbacks $BB_READBACKS, linear $BB_READBACK_LINEAR, pre-upload $BB_PREUPLOAD, write windows $BB_WRITE_WINDOW"
 fi
 # NHL 19: the game asks for flip rate 1 (30 FPS) for its intro videos, team select and matches, and
 # 0 (60 FPS) in the menus. BB_FLIP_RATE=0 keeps it at 60 throughout; BB_FLIP_RATE=-1 lets the game

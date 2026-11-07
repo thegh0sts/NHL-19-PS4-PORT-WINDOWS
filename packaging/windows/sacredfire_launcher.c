@@ -75,9 +75,10 @@ typedef struct {
      * BB_LOG_DIR wins over it. */
     wchar_t log_dir[PATHW];
 } Settings;
-static Settings settings = {.resolution = 1, .fps_mode = 5, .present_mode = 2, .upscaler = 0, .sharpness = 2, .skip_movies = 1};
+static Settings settings = {.resolution = 1, .fps_mode = 5, .present_mode = 2, .upscaler = 0, .sharpness = 2, .skip_movies = 0};
 /* Choices of the Video panel (index = the saved value). */
-static const wchar_t *const resolution_names[] = {L"1280x720", L"1920x1080", L"2560x1440 (2K, experimental)", L"3840x2160 (4K, experimental)"};
+/* NHL 19: 720p / 1080p (UFC 3's 2K / 4K are scene patches for UFC 3; a saved 2 or 3 from elsewhere reads as 720p). */
+static const wchar_t *const resolution_names[] = {L"1280x720", L"1920x1080"};
 /* 2K and 4K (UFC-45/46, validated on Linux): PS4 Pro with a 3840x2160 VideoOut in both, and the
  * experiment's patch (patches\experiments\<dir>, its own patches json) turning the game's
  * 3200x1800 Favor Resolution scene into 2560x1440 / 3840x2160. The scene only grows with
@@ -806,18 +807,18 @@ static DWORD play_impl(const wchar_t *const *extra, int extra_count) {
     wchar_t eboot[PATHW]; join(eboot, PATHW, game, L"eboot.bin");
     if (!game[0] || !exists(eboot)) {
         wchar_t m[PATHW + 128];
-        _snwprintf(m, PATHW + 128, L"No eboot.bin in \"%ls\": choose the game folder (CUSA06534, with CUSA06534-patch beside it or merged in).", game);
+        _snwprintf(m, PATHW + 128, L"No eboot.bin in \"%ls\": choose the game folder (CUSA11126, with CUSA11126-patch beside it or merged in).", game);
         m[PATHW + 127] = 0; fail(m); return 2;
     }
-    /* Base and update side by side (CUSA06534 + CUSA06534-patch, as PKG extractors leave them):
-     * merge_update.py links them into CUSA06534-merged once, and that folder is played. */
+    /* Base and update side by side (CUSA11126 + CUSA11126-patch, as PKG extractors leave them):
+     * merge_update.py links them into CUSA11126-merged once, and that folder is played. */
     static wchar_t merged_game[PATHW];
     {
         static char merged[PATHW * 3];
         const wchar_t *args[] = {game};
         if (script(L"scripts", L"merge_update.py", args, 1, merged, sizeof(merged))) {
             logf("%s", merged);
-            fail(L"Merging the 1.14 update into the game folder failed (see the log).");
+            fail(L"Merging the 1.60 update into the game folder failed (see the log).");
             return 2;
         }
         /* The folder is the last line (progress lines come before it). */
@@ -835,13 +836,13 @@ static DWORD play_impl(const wchar_t *const *extra, int extra_count) {
         if (script(L"scripts", L"game_check.py", args, 1, profile, sizeof(profile))) {
             logf("%s", profile);
             fail(strstr(profile, "missing or damaged")
-                 ? L"The game check failed (see the log): some game files are missing or damaged. Extract the game and the 1.14 update again."
-                 : L"The game check failed (see the log): the folder is not EA SPORTS UFC 3 CUSA06534 with the 1.14 update (CUSA06534-patch) beside it or merged in.");
+                 ? L"The game check failed (see the log): some game files are missing or damaged. Extract the game and the 1.60 update again."
+                 : L"The game check failed (see the log): the folder is not NHL 19 CUSA11126 with the 1.60 update (CUSA11126-patch) beside it or merged in.");
             return 2;
         }
         trim(profile);
     }
-    if (!profile[0]) snprintf(profile, sizeof(profile), "ufc3");
+    if (!profile[0]) snprintf(profile, sizeof(profile), "nhl19");
     /* The update's build (5.05, 6.72+ or ?): the address-keyed diagnostics know the 5.05 build only. */
     {
         char variant[64] = "?";
@@ -881,7 +882,7 @@ static DWORD play_impl(const wchar_t *const *extra, int extra_count) {
     const wchar_t *patches_dir_used = given_env(L"BB_PATCHES_DIR") ? given_env(L"BB_PATCHES_DIR") : patches_dir;
     const wchar_t *patches_config_used = given_env(L"BB_PATCHES_CONFIG") ? given_env(L"BB_PATCHES_CONFIG") : patches_config;
     const wchar_t *patch_args[] = {L"--patches-dir", patches_dir_used, L"--patches-config", patches_config_used,
-                                   L"--app-version", L"01.14", L"--title-id", L"CUSA06534", L"--out", out, L"--settings", config};
+                                   L"--app-version", L"01.60", L"--title-id", L"CUSA11126", L"--out", out, L"--settings", config};
     if (script(L"scripts", L"patches.py", patch_args, 12, NULL, 0)) { fail(L"patches.py failed (see the log)"); return 2; }
     /* The count of guest TCB loads the linker rewrote (link.json fs_loads_patched): the game
      * executable cross-checks its own scan against it. */
@@ -914,6 +915,10 @@ static DWORD play_impl(const wchar_t *const *extra, int extra_count) {
     game_env(L"BB_GAMEPAD", settings.gamepad[0] ? settings.gamepad : NULL);
     game_env(L"BB_USER_NAME", settings.player[0] ? settings.player : NULL); /* the PS4 user name the game shows */
     game_env(L"BB_LANGUAGE", language_ids[settings.language]); /* a BB_LANGUAGE set before the launcher (a .bat) wins */
+    /* NHL 19: no online play (UFC 3's Join/Host is for its own server); the network mode without a
+     * server, BB_ONLINE_SERVER=127.0.0.1, gets the game past its offline start-up crash (a null
+     * online-service global read by the sim thread). */
+    settings.online_mode = ONLINE_OFFLINE;
     const wchar_t *online = settings.online_mode == ONLINE_HOST ? settings.host_address :
                             settings.online_mode == ONLINE_JOIN ? settings.join_address : NULL;
     if (settings.online_mode == ONLINE_JOIN && !settings.join_address[0] && !given_env(L"BB_ONLINE_SERVER")) {
@@ -922,7 +927,8 @@ static DWORD play_impl(const wchar_t *const *extra, int extra_count) {
     if (settings.online_mode == ONLINE_HOST && given_env(L"BB_ONLINE_SERVER") && wcscmp(given_env(L"BB_ONLINE_SERVER"), settings.host_address)) {
         fail(L"BB_ONLINE_SERVER differs from the selected Host address. Remove the environment override or select that same local IP."); return 2;
     }
-    game_env(L"BB_ONLINE_SERVER", online);
+    (void)online;
+    game_env(L"BB_ONLINE_SERVER", L"127.0.0.1");
     /* The fight scene renders black without precise readbacks of linear images (shadPS4 issue
      * #4375, UFC 4, same engine); precise readbacks deadlock against the GPU write twins, so
      * those stay off. The game asks for flip rate 1 (30 Hz); its simulation follows the real
@@ -931,17 +937,22 @@ static DWORD play_impl(const wchar_t *const *extra, int extra_count) {
     /* PS4 Pro mode: the game renders its scene at 1080p instead of 900p (CMask reads are
      * answered as uncompressed by the runtime). */
     game_env(L"BB_NEO", settings.neo || experiment ? L"1" : L"0"); /* 2K / 4K: always Pro (its 4K VideoOut) */
-    game_env(L"BB_READBACKS", L"2"); game_env(L"BB_READBACK_LINEAR", L"1"); game_env(L"BB_GPU_WRITE_TWINS", L"0");
+    /* NHL 19 (tested with scripts/run-msys2.sh): readbacks 1 with the linear readbacks draws the
+     * players (black without the linear ones) with calm jerseys (2 left a slight jitter). */
+    game_env(L"BB_READBACKS", L"1"); game_env(L"BB_READBACK_LINEAR", L"1"); game_env(L"BB_GPU_WRITE_TWINS", L"0");
     /* Write windows and single-stepped writes on, as on Linux (run.sh): UFC-48 made the windows
      * coherent (the heap corruption of 0.1.4 is gone). Validated on Windows 2026-10-16 (RTX 3060):
      * Career fight ~47 FPS, blood and sweat, created fighter's skin, second fight and contract
      * without a crash. Their audit (BB_WRITE_WINDOW_DIAG) stays in the test launcher only. */
-    game_env(L"BB_WRITE_WINDOW", L"1"); game_env(L"BB_WRITE_STEP", L"1");
-    game_env(L"BB_FLIP_RATE", L"0"); game_env(L"BB_VBLANK_HZ", L"480");
+    /* NHL 19: write windows and stepped writes send the players' cloth vertices to the GPU while
+     * the game still writes them (the jerseys shake): off. 60 FPS throughout (the game asks for
+     * 30 in matches) at the real 60 Hz: UFC 3's 480 Hz virtual vblank is not NHL 19's timing. */
+    game_env(L"BB_WRITE_WINDOW", L"0"); game_env(L"BB_WRITE_STEP", L"0");
+    game_env(L"BB_FLIP_RATE", L"0"); game_env(L"BB_VBLANK_HZ", L"60");
     game_env(L"BB_Z16S8_AS_D16", L"1");
     /* Pre-upload restores blood and sweat on hits (UFC-49); validated on Windows together with
      * the write windows above. The user's environment wins over all three. */
-    game_env(L"BB_PREUPLOAD", L"1");
+    game_env(L"BB_PREUPLOAD", L"1"); /* NHL 19: the main menu needs it too */
 #ifdef UFC3_WRITE_WINDOWS_TEST
     /* UFC-48 test launcher (UFC3-WRITE-WINDOWS-TEST.exe; UFC3.exe is the release one, unchanged):
      * write windows and single steps on, with their audit, to measure the coherent windows. */
@@ -950,7 +961,7 @@ static DWORD play_impl(const wchar_t *const *extra, int extra_count) {
     SetEnvironmentVariableW(L"BB_WRITE_WINDOW_DIAG", L"1");
     SetEnvironmentVariableW(L"BB_WRITE_WINDOW_DIAG_MAX", L"1000");
 #endif
-    game_env(L"BB_COPY_GPU_BUFFERS", L"1");
+    game_env(L"BB_COPY_GPU_BUFFERS", NULL); /* NHL 19: the runtime default, as tested */
 #ifdef UFC3_DIAGNOSTIC_PACKAGE
     /* The diagnostic variant (UFC-42) runs the write windows with their audit, forced, as the
      * .cmd of the diagnostic package did. */
@@ -966,7 +977,7 @@ static DWORD play_impl(const wchar_t *const *extra, int extra_count) {
     game_env(L"BB_WINDOW_SIZE", display_sizes[settings.display]);
     {
         wchar_t clip[PATHW]; join(clip, PATHW, root, L"share\\skip_movie.mkv");
-        game_env(L"BB_SKIP_MOVIES", settings.skip_movies && exists(clip) ? L"1" : L"0");
+        game_env(L"BB_SKIP_MOVIES", L"0"); /* NHL 19: its own videos (the clip is UFC 3's) */
         game_env(L"BB_SKIP_MOVIE_FILE", clip);
     }
     game_env(L"BB_FSR1", settings.upscaler == 1 ? L"1" : L"0");
@@ -975,21 +986,21 @@ static DWORD play_impl(const wchar_t *const *extra, int extra_count) {
     SetEnvironmentVariableW(L"BB_UFFD", L"0");            /* Linux only */
     SetEnvironmentVariableW(L"BB_GUEST_IN_PLACE", L"0");  /* dma-buf memory model: Linux only */
     /* env_or keeps 8 values at a time: two lines. */
-    logw(L"UFC 3: output %lsx%ls, frame limit %ls (0: none), present mode %ls, fullscreen %ls\n",
+    logw(L"NHL 19: output %lsx%ls, frame limit %ls (0: none), present mode %ls, fullscreen %ls\n",
          env_or(L"BB_INTERNAL_WIDTH", L"?"), env_or(L"BB_INTERNAL_HEIGHT", L"?"), env_or(L"BB_FPS_LIMIT", L"?"),
          env_or(L"BB_PRESENT_MODE", L"?"), env_or(L"BB_FULLSCREEN", L"0"));
-    logw(L"UFC 3: player name \"%ls\", language %ls (BB_LANGUAGE)\n", env_or(L"BB_USER_NAME", L"Player 1"), env_or(L"BB_LANGUAGE", L"1"));
+    logw(L"NHL 19: player name \"%ls\", language %ls (BB_LANGUAGE)\n", env_or(L"BB_USER_NAME", L"Player 1"), env_or(L"BB_LANGUAGE", L"1"));
     {
         const wchar_t *server = env_or(L"BB_ONLINE_SERVER", L"");
-        if (server[0]) logw(L"UFC 3: online server %ls (BB_ONLINE_SERVER)\n", server); else logw(L"UFC 3: offline (no BB_ONLINE_SERVER)\n");
+        if (server[0]) logw(L"NHL 19: online server %ls (BB_ONLINE_SERVER)\n", server); else logw(L"NHL 19: offline (no BB_ONLINE_SERVER)\n");
     }
     if (experiment)
         logw(L"4K/2K experimental: in game choose VIDEO -> Favor Resolution (the scene grows only with it). %ls scene, PS4 Pro %ls, "
              L"patches %ls\n", resolution_names[settings.resolution], env_or(L"BB_NEO", L"?"), patches_dir_used);
-    logw(L"UFC 3: window %ls, FSR 1.0 %ls, RCAS %ls (attenuation %ls), readbacks %ls (2 = precise)\n",
+    logw(L"NHL 19: window %ls, FSR 1.0 %ls, RCAS %ls (attenuation %ls), readbacks %ls (2 = precise)\n",
          env_or(L"BB_WINDOW_SIZE", L"= output"), env_or(L"BB_FSR1", L"0"), env_or(L"BB_RCAS", L"?"), env_or(L"BB_RCAS_ATTENUATION", L"?"), env_or(L"BB_READBACKS", L"?"));
     if (settings.clear_cache || !wcscmp(env_or(L"BB_CLEAR_SHADER_CACHE", L"0"), L"1")) {
-        wchar_t cache[PATHW]; join(cache, PATHW, env_or(L"BB_USER_DIR", user_dir), L"cache\\CUSA06534");
+        wchar_t cache[PATHW]; join(cache, PATHW, env_or(L"BB_USER_DIR", user_dir), L"cache\\CUSA11126");
         if (exists(cache)) {
             wchar_t command[PATHW + 64]; _snwprintf(command, PATHW + 64, L"cmd.exe /c rd /s /q \"%ls\"", cache); command[PATHW + 63] = 0;
             run(command, NULL, 0, 0, INFINITE);
@@ -1358,9 +1369,9 @@ static void paint_window(HDC dc, RECT client) {
     }
     RECT t = {text_x, sx(26), client.right - sx(16), sx(66)};
     SelectObject(dc, font_title); SetTextColor(dc, C_GOLD);
-    DrawTextW(dc, L"EA SPORTS UFC 3 \x2014 native PC port", -1, &t, DT_SINGLELINE | DT_LEFT | DT_BOTTOM | DT_NOPREFIX | DT_END_ELLIPSIS);
+    DrawTextW(dc, L"NHL 19 \x2014 native PC port", -1, &t, DT_SINGLELINE | DT_LEFT | DT_BOTTOM | DT_NOPREFIX | DT_END_ELLIPSIS);
     char version[256]; read_version(version, sizeof(version));
-    wchar_t line[160]; _snwprintf(line, 160, L"PS4 CUSA06534 \x00B7 SacredFire %hs \x00B7 your own game dump required", version); line[159] = 0;
+    wchar_t line[160]; _snwprintf(line, 160, L"PS4 CUSA11126 \x00B7 SacredFire %hs \x00B7 your own game dump required", version); line[159] = 0;
     t.top = sx(70); t.bottom = sx(90);
     SelectObject(dc, ui_font); SetTextColor(dc, C_TEXT_DIM);
     DrawTextW(dc, line, -1, &t, DT_SINGLELINE | DT_LEFT | DT_NOPREFIX | DT_END_ELLIPSIS);
@@ -1640,7 +1651,7 @@ static void controls_open(void) {
     static int registered;
     if (!registered) {
         WNDCLASSW wc = {.lpfnWndProc = ctl_proc, .hInstance = GetModuleHandleW(NULL), .hCursor = LoadCursorW(NULL, IDC_ARROW),
-                        .hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1), .lpszClassName = L"UFC3NativeControls"};
+                        .hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1), .lpszClassName = L"NHL19NativeControls"};
         RegisterClassW(&wc);
         registered = 1;
     }
@@ -1648,7 +1659,7 @@ static void controls_open(void) {
     const int rows_h = 26, top = 40, client_w = 640, client_h = top + CTL_INPUTS * rows_h + 56;
     RECT r = {0, 0, sx(client_w), sx(client_h)};
     AdjustWindowRect(&r, WS_CAPTION | WS_SYSMENU, FALSE);
-    ctl_window = CreateWindowExW(WS_EX_DLGMODALFRAME, L"UFC3NativeControls", L"Controls", WS_CAPTION | WS_SYSMENU | WS_POPUP,
+    ctl_window = CreateWindowExW(WS_EX_DLGMODALFRAME, L"NHL19NativeControls", L"Controls", WS_CAPTION | WS_SYSMENU | WS_POPUP,
                                  CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, main_window, NULL,
                                  GetModuleHandleW(NULL), NULL);
     if (!ctl_window) return;
@@ -1674,7 +1685,10 @@ static void controls_open(void) {
 
 /* The window into the settings; patch switches go to bbport.ini when they changed. */
 static void online_controls(void) {
-    int mode = (int)SendMessageW(control(ID_MODE), CB_GETCURSEL, 0, 0);
+    /* NHL 19: Online play stays Offline (the launcher sets the network mode itself). */
+    SendMessageW(control(ID_MODE), CB_SETCURSEL, ONLINE_OFFLINE, 0);
+    EnableWindow(control(ID_MODE), FALSE);
+    int mode = ONLINE_OFFLINE;
     EnableWindow(control(ID_ONLINE), !running && mode == ONLINE_JOIN);
     EnableWindow(control(ID_HOST), !running && mode == ONLINE_HOST);
     EnableWindow(control(ID_HOSTSCAN), !running && mode == ONLINE_HOST);
@@ -1688,6 +1702,7 @@ static void video_controls(void) {
     const int forced = resolution_experiment[r] != NULL;
     set_checked(ID_NEO, forced || neo_user);
     EnableWindow(control(ID_NEO), !running && !forced);
+    set_checked(ID_SKIPMOVIES, 0); EnableWindow(control(ID_SKIPMOVIES), FALSE); /* NHL 19: UFC 3's clip */
 }
 static void fill_host_addresses(void) {
     wchar_t current[256]; GetWindowTextW(control(ID_HOST), current, COUNT(current));
@@ -1880,7 +1895,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
         else if (id == ID_MODE && code == CBN_SELCHANGE) online_controls();
         else if (id == ID_HOSTSCAN && !running) fill_host_addresses();
         else if (id == ID_COPYHOST) copy_host_address();
-        else if (id == ID_BROWSE) { wchar_t folder[PATHW]; if (pick_folder(L"The game folder (CUSA06534; CUSA06534-patch beside it is merged automatically)", folder)) {
+        else if (id == ID_BROWSE) { wchar_t folder[PATHW]; if (pick_folder(L"The game folder (CUSA11126; CUSA11126-patch beside it is merged automatically)", folder)) {
             SetWindowTextW(control(ID_GAME), folder);
             banner_load(folder); RECT banner = {0, 0, sx(CLIENT_W), sx(BANNER_H)}; InvalidateRect(window, &banner, FALSE);
         } }
@@ -1995,18 +2010,18 @@ static int gui(HINSTANCE instance, const wchar_t *const *extra, int extra_count)
     brush_background = CreateSolidBrush(C_BACKGROUND); brush_panel = CreateSolidBrush(C_PANEL);
     brush_input = CreateSolidBrush(C_INPUT); brush_log = CreateSolidBrush(C_LOG);
     WNDCLASSW wc = {.lpfnWndProc = window_proc, .hInstance = instance, .hCursor = LoadCursorW(NULL, IDC_ARROW),
-                    .hbrBackground = brush_background, .lpszClassName = L"UFC3NativeLauncher", .hIcon = LoadIconW(instance, MAKEINTRESOURCEW(1))};
+                    .hbrBackground = brush_background, .lpszClassName = L"NHL19NativeLauncher", .hIcon = LoadIconW(instance, MAKEINTRESOURCEW(1))};
     RegisterClassW(&wc);
     const DWORD style = (WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX) | WS_CLIPCHILDREN;
     /* The client area is CLIENT_W x CLIENT_H at 96 DPI: the window is created, measured, and
      * resized by the difference (the frame metrics of the running system, whatever they are). */
     const int client_w = sx(CLIENT_W), client_h = sx(CLIENT_H);
 #if defined(UFC3_WRITE_WINDOWS_TEST)
-    const wchar_t *window_title = L"EA SPORTS UFC 3 - native PC port (UFC-48 write windows test)";
+    const wchar_t *window_title = L"NHL 19 - native PC port (UFC-48 write windows test)";
 #elif defined(UFC3_DIAGNOSTIC_PACKAGE)
-    const wchar_t *window_title = L"EA SPORTS UFC 3 - native PC port (Windows diagnostic test)";
+    const wchar_t *window_title = L"NHL 19 - native PC port (Windows diagnostic test)";
 #else
-    const wchar_t *window_title = L"EA SPORTS UFC 3 - native PC port";
+    const wchar_t *window_title = L"NHL 19 - native PC port";
 #endif
     main_window = CreateWindowExW(0, wc.lpszClassName, window_title, style, CW_USEDEFAULT, CW_USEDEFAULT, client_w + 16, client_h + 64,
                                   NULL, NULL, instance, NULL);
@@ -2058,7 +2073,7 @@ static int gui(HINSTANCE instance, const wchar_t *const *extra, int extra_count)
     }
     /* GAME (left column; content x 28..430) */
     int y = 134 + 34;
-    label(L"Game folder (CUSA06534, with CUSA06534-patch beside it)", 28, y, 402); y += 26;
+    label(L"Game folder (CUSA11126, with CUSA11126-patch beside it)", 28, y, 402); y += 26;
     edit(settings.game, 28, y, 306, ID_GAME);
     button(L"Browse...", 342, y, 88, 24, ID_BROWSE); y += 32;
     label(L"Player name", 28, y, 118);
@@ -2193,7 +2208,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR command_line, 
     else {
         PWSTR local = NULL;
         if (FAILED(SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &local))) { fail(L"no %LOCALAPPDATA%"); return 2; }
-        join(data, PATHW, local, L"UFC3Native"); CoTaskMemFree(local);
+        join(data, PATHW, local, L"NHL19Native"); CoTaskMemFree(local);
     }
 #endif
     ensure_directory(data);
