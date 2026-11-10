@@ -937,9 +937,10 @@ static DWORD play_impl(const wchar_t *const *extra, int extra_count) {
     /* PS4 Pro mode: the game renders its scene at 1080p instead of 900p (CMask reads are
      * answered as uncompressed by the runtime). */
     game_env(L"BB_NEO", settings.neo || experiment ? L"1" : L"0"); /* 2K / 4K: always Pro (its 4K VideoOut) */
-    /* NHL 19 (tested with scripts/run-msys2.sh): readbacks 1 with the linear readbacks draws the
-     * players (black without the linear ones) with calm jerseys (2 left a slight jitter). */
-    game_env(L"BB_READBACKS", L"1"); game_env(L"BB_READBACK_LINEAR", L"1"); game_env(L"BB_GPU_WRITE_TWINS", L"0");
+    /* NHL 19 (tested with scripts/run-msys2.sh): precise readbacks (2) with the linear readbacks
+     * draw the players (black without the linear ones); bearded faces need 2 (a streak to the skates
+     * with 1), and with the red-zone fix the jerseys are calmer with 2 than with 1. */
+    game_env(L"BB_READBACKS", L"2"); game_env(L"BB_READBACK_LINEAR", L"1"); game_env(L"BB_GPU_WRITE_TWINS", L"0");
     /* Write windows and single-stepped writes on, as on Linux (run.sh): UFC-48 made the windows
      * coherent (the heap corruption of 0.1.4 is gone). Validated on Windows 2026-10-16 (RTX 3060):
      * Career fight ~47 FPS, blood and sweat, created fighter's skin, second fight and contract

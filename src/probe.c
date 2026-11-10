@@ -520,6 +520,22 @@ int main(int argc, char **argv) {
 #else
     (void)tls_loads;
 #endif
+    /* Windows: the guest red zone out of reach of exception frames (runtime_fp.c). */
+    if (runtime_redzone_enabled()) {
+        uint64_t *addresses = calloc(ns ? ns : 1, sizeof(uint64_t)), *sizes = calloc(ns ? ns : 1, sizeof(uint64_t)), *flags = calloc(ns ? ns : 1, sizeof(uint64_t));
+        uint64_t *pointers = calloc(nr ? nr : 1, sizeof(uint64_t)), pointer_count = 0;
+        if (!addresses || !sizes || !flags || !pointers) fail("allocation failed");
+        for (uint64_t i = 0; i < ns; ++i) { addresses[i] = segments[i].address; sizes[i] = segments[i].size; flags[i] = segments[i].flags; }
+        for (uint64_t i = 0; i < nr; ++i) if (!relocs[i].kind) pointers[pointer_count++] = relocs[i].value;
+        RuntimeFpStats rz;
+        const uint64_t start = platform_monotonic_ns();
+        runtime_redzone_patch_image(image, size, addresses, sizes, flags, ns, pointers, pointer_count, map_near_image, &rz);
+        printf("Red zone (BB_REDZONE_SHIFT): %" PRIu64 " of %" PRIu64 " accesses moved 64 KiB lower in %" PRIu64 " functions "
+               "(%" PRIu64 " kept, %" PRIu64 " switch-table entries seen), %" PRIu64 " KiB of stubs, %.0f ms\n",
+               rz.patched, rz.found, rz.functions, rz.unpatched, rz.displaced, rz.stub_bytes / 1024,
+               (double)(platform_monotonic_ns() - start) / 1e6);
+        free(addresses); free(sizes); free(flags); free(pointers);
+    }
     /* ufc3 online (UFC-25): approximate reciprocals that give the same bits on every CPU. */
     if (runtime_fp_deterministic()) {
         uint64_t *addresses = calloc(ns, sizeof(uint64_t)), *sizes = calloc(ns, sizeof(uint64_t)), *flags = calloc(ns, sizeof(uint64_t));

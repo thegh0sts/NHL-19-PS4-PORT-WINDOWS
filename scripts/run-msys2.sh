@@ -60,8 +60,10 @@ fi
 # writes, Z16+S8 depth kept as D16. Each can still be overridden from the command line.
 if [[ $profile == nhl19 || $profile == ufc3 ]]; then
     if [[ $profile == nhl19 ]]; then
-        # NHL 19: readbacks 1 draws the players as 2 does, with calmer jerseys (2 still left a slight jitter).
-        export BB_READBACKS=${BB_READBACKS:-1}
+        # NHL 19: precise readbacks (2). With the red-zone fix (runtime_fp.c) they no longer shake the
+        # jerseys (their read faults used to overwrite the game's red zone), and the bearded players'
+        # faces need them (with 1 a beard streak runs down to the skates in team select).
+        export BB_READBACKS=${BB_READBACKS:-2}
     fi
     export BB_READBACKS=${BB_READBACKS:-2} BB_READBACK_LINEAR=${BB_READBACK_LINEAR:-1} BB_GPU_WRITE_TWINS=${BB_GPU_WRITE_TWINS:-0}
     if [[ $profile == nhl19 ]]; then
