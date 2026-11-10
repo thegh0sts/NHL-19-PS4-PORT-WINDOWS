@@ -31,7 +31,8 @@ and HUD drawn, at 60 FPS on a modern PC. Most other modes haven't been tested ye
 | Other modes (Franchise, Be a Pro, Ones, EASHL offline...) | Not tested yet |
 | Main menu hub tiles | Missing: they're drawn by the game's web engine (EAWebKit), which isn't loaded yet |
 | Frame rate | 60 FPS throughout (the game asks for 30 in matches; the port keeps 60) |
-| Player jerseys (cloth) | Calm with the default settings |
+| Player jerseys (cloth) | Calm with the default settings; a slight jitter at the hem in team select |
+| Bearded players | Drawn correctly (since v0.2.0) |
 | Saves | Profile save loads; not tested much further |
 | Controller | Working (one local player for now) |
 | Local multiplayer (several controllers) | Not yet |
@@ -174,7 +175,7 @@ putting it in front of the command, for example `BB_FLIP_RATE=-1 bash scripts/ru
 
 | Variable | NHL 19 default | Effect |
 |---|---|---|
-| `BB_READBACKS` / `BB_READBACK_LINEAR` | 1 / 1 | Reads of GPU-written memory. Without the linear ones, the players and rink render black |
+| `BB_READBACKS` / `BB_READBACK_LINEAR` | 2 / 1 | Reads of GPU-written memory. 2 is precise (1 leaves a streak from bearded players' chins to their skates). Without the linear ones, the players and rink render black |
 | `BB_WRITE_WINDOW` / `BB_WRITE_STEP` | 0 / 0 | UFC 3's write handling. On, the players' jerseys shake |
 | `BB_PREUPLOAD` | 1 | Background upload of rewritten memory to the GPU |
 | `BB_FLIP_RATE` | 0 | 0: 60 FPS throughout. `-1`: the game's own choice (30 FPS in matches, as on a PS4) |
@@ -182,6 +183,7 @@ putting it in front of the command, for example `BB_FLIP_RATE=-1 bash scripts/ru
 | `BB_SSE4A_LOG=1` | off | Logs each emulated AMD-only instruction |
 | `BB_LOG_UNRESOLVED=1` | off | Logs every unhandled system call (very large logs) |
 | `BB_FRAME_STATS=1` | off | Frame timing in the log |
+| `BB_REDZONE_SHIFT` | on | Protects the game's stack data from Windows exception handling (see v0.2.0). `0` turns it off, for comparison |
 
 `python3 tools/module_imports.py <module.prx>` lists what a game module needs from the system and
 how much of it the port already provides.
@@ -222,6 +224,35 @@ Please don't attach game files or anything from the `out` folder: they're made f
 can't be shared. Saves are fine to share: they hold only your progress and settings.
 
 ## Version history
+
+### v0.2.0 (2026-11-10)
+
+Fixes for the players' looks, and a stability fix for every part of the game.
+
+**Game**
+- Bearded players drawn correctly: no more dark streak from the chin down to the skates in team
+  select
+- Calmer jerseys than in v0.1.0 (a slight jitter at the hem in team select remains)
+- Fewer random glitches and crashes: the game's short-lived stack data is now safe from Windows'
+  exception handling (details below)
+
+**Under the hood**
+- PS4 code may keep data in the 128 bytes just below its stack pointer (the "red zone"). Windows
+  writes its exception information right there whenever an instruction faults, and the port's GPU
+  memory tracking makes the game fault thousands of times a minute on purpose. Each of those could
+  silently overwrite the game's data. At start-up the port now moves the game's red-zone accesses
+  64 KiB lower, out of reach (about 9,500 of them). Code that switches stacks, such as libc's, is
+  left alone. `BB_REDZONE_SHIFT=0` turns this off
+- Precise readbacks (`BB_READBACKS=2`) are now the default, in the launcher too: the game reads the
+  GPU's results for faces fresh. Before the red-zone fix, these extra faults made the jerseys shake,
+  which is why v0.1.0 used 1
+- Builds from a clean checkout are no longer marked `-dirty` (line endings and a file-name clash
+  fixed)
+
+**Known issues**
+- Main menu hub tiles are still empty (EAWebKit isn't loaded yet)
+- A slight jitter at the bottom of the jerseys in team select
+- Modes other than Play Now are untested; one local player only; no online play
 
 ### v0.1.0 (2026-11-08)
 
