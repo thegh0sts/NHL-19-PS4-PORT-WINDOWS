@@ -624,6 +624,10 @@ static unsigned char *emit_shifted(unsigned char *q, const unsigned char *code, 
     memcpy(q, code + after, in->length - after); /* immediates */
     return q + (in->length - after);
 }
+static int redzone_excluded(uint64_t (*exclude)[2], unsigned count, uint64_t at) {
+    for (unsigned i = 0; i < count; ++i) if (at >= exclude[i][0] && at < exclude[i][1]) return 1;
+    return 0;
+}
 /* Entries of a switch table (int32 offsets from the table) that land in [start, end). */
 static uint64_t mark_jump_table(Scan *c, uint64_t size, uint64_t table, uint64_t start, uint64_t end) {
     uint64_t n = 0;
@@ -663,6 +667,20 @@ uint64_t runtime_redzone_patch_image(unsigned char *image, uint64_t size, const 
         if (rest && *rest == '-') range_to = strtoull(rest + 1, NULL, 16);
         printf("Red zone: only accesses at image offsets 0x%" PRIx64 "-0x%" PRIx64 " (BB_REDZONE_RANGE)\n", range_from, range_to);
     }
+    /* BB_REDZONE_EXCLUDE=<from>-<to>[,<from>-<to>...] (hex image offsets): accesses there are left alone. */
+    uint64_t exclude[16][2];
+    unsigned exclude_count = 0;
+    for (const char *e = getenv("BB_REDZONE_EXCLUDE"); e && *e && exclude_count < 16;) {
+        char *rest = NULL;
+        exclude[exclude_count][0] = strtoull(e, &rest, 16);
+        if (!rest || *rest != '-') break;
+        exclude[exclude_count][1] = strtoull(rest + 1, &rest, 16);
+        printf("Red zone: accesses at image offsets 0x%" PRIx64 "-0x%" PRIx64 " left alone (BB_REDZONE_EXCLUDE)\n",
+               exclude[exclude_count][0], exclude[exclude_count][1]);
+        ++exclude_count;
+        e = rest && *rest == ',' ? rest + 1 : "";
+    }
+#define REDZONE_WANTED(x) ((x) >= range_from && (x) < range_to && !redzone_excluded(exclude, exclude_count, (x)))
     /* Functions whose red zone is not used the compiler way are left alone (BB_REDZONE_ALL=1: not). */
     const int all_functions = getenv("BB_REDZONE_ALL") && getenv("BB_REDZONE_ALL")[0] == '1';
     uint64_t skipped_accesses = 0, skipped_functions = 0;
@@ -681,7 +699,7 @@ uint64_t runtime_redzone_patch_image(unsigned char *image, uint64_t size, const 
                 mark(&c, addressed, size);
                 if (in.mnemonic == ZYDIS_MNEMONIC_LEA) stats->displaced += mark_jump_table(&c, size, addressed, ranges[r].start, ranges[r].end);
             }
-            if (at >= range_from && at < range_to && redzone_site(&in, op, image + at)) {
+            if (REDZONE_WANTED(at) && redzone_site(&in, op, image + at)) {
                 if (count == capacity) {
                     uint64_t *grown = realloc(sites, (capacity = capacity ? capacity * 2 : 65536) * 2 * sizeof(*sites));
                     if (!grown) { free(sites); free(ranges); free(c.targets); return 0; }
@@ -691,7 +709,10 @@ uint64_t runtime_redzone_patch_image(unsigned char *image, uint64_t size, const 
                 used = 1;
             }
             if (in.meta.category == ZYDIS_CATEGORY_CALL) unusual = 1;
-            else if (used && in.mnemonic != ZYDIS_MNEMONIC_POP && in.meta.category != ZYDIS_CATEGORY_RET)
+            /* pop, ret and add rsp, imm (a frame released on the way out) are the compiler's own */
+            else if (used && in.mnemonic != ZYDIS_MNEMONIC_POP && in.meta.category != ZYDIS_CATEGORY_RET &&
+                     !(in.mnemonic == ZYDIS_MNEMONIC_ADD && op[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                       op[0].reg.value == ZYDIS_REGISTER_RSP && op[1].type == ZYDIS_OPERAND_TYPE_IMMEDIATE))
                 for (unsigned i = 0; i < in.operand_count; ++i)
                     if (op[i].type == ZYDIS_OPERAND_TYPE_REGISTER && (op[i].actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) &&
                         (op[i].reg.value == ZYDIS_REGISTER_RSP || op[i].reg.value == ZYDIS_REGISTER_ESP || op[i].reg.value == ZYDIS_REGISTER_SP))
@@ -727,7 +748,7 @@ uint64_t runtime_redzone_patch_image(unsigned char *image, uint64_t size, const 
             const uint64_t here = at + length;
             if (here >= end || (length && is_target(&c, here)) || (size_t)(q - stub) > REDZONE_STUB - 40 ||
                 !ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, image + here, end - here, &in, op))) { ok = 0; break; }
-            if (here >= range_from && here < range_to && redzone_site(&in, op, image + here)) q = emit_shifted(q, image + here, &in);
+            if (REDZONE_WANTED(here) && redzone_site(&in, op, image + here)) q = emit_shifted(q, image + here, &in);
             else if (redzone_site(&in, op, image + here)) ok = 0; /* outside the range: stays where it is */
             else if (length && length + in.length >= JMP && relative_jump(&in)) {
                 const unsigned char *target = image + here + in.length + in.raw.imm[0].value.s;
