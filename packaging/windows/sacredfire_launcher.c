@@ -6,7 +6,7 @@
  * (Offline, Join server: the host's address, Host server: this PC runs tools\ufc3_server.py for
  * the session, see "Host server" below), the controller for port 1, the game patches (written to bbport.ini as the in-game menu does), PS4 Pro mode, fullscreen,
  * the developer switches (frame statistics, Vulkan validation, clear the shader cache, menu
- * trace), the log folder (empty: <data>\logs; BB_LOG_DIR wins over the window), Play/Stop, the
+ * trace), the log folder (empty: logs beside the launcher; BB_LOG_DIR wins over the window), Play/Stop, the
  * log of the run, and buttons for the logs and data folders. Settings are kept in
  * <data>\sacredfire.ini.
  * Built with -DUFC3_DIAGNOSTIC_PACKAGE (the UFC-42 diagnostic test), the launcher keeps its
@@ -16,7 +16,8 @@
  * (python\python.exe, the official embeddable package; game_check, prepare, link_libc,
  * link_modules, gen_import_names with the bundled aerolib.inl, content_profile, patches),
  * then bin\sacredfire-game.exe with the same arguments and BB_RESTART_COMMAND for the in-game
- * restart. Everything printed goes to the window, to <data>\logs\<time>.log, and to the console
+ * restart. Everything printed goes to the window, to <launcher folder>\logs\<time>.log (or
+ * <data>\logs when the launcher's folder cannot be written), and to the console
  * when started from one.
  * Command line: `--play` starts the game at once with the saved settings and no window (Steam
  * shortcuts); `--game <folder>` sets the folder; other arguments go to the game.
@@ -176,14 +177,16 @@ static const wchar_t *env_or(const wchar_t *name, const wchar_t *fallback) {
     return n && n < 1024 ? value : fallback;
 }
 /* The folder the logs go to: BB_LOG_DIR when set and not empty, else the window's "Log folder"
- * (settings.log_dir), else <data>\logs; made absolute. A mapped drive or a UNC share
+ * (settings.log_dir), else logs beside the launcher (NHL 19: easy to find and attach to a bug
+ * report; open_log_file falls back to <data>\logs when that folder cannot be written, e.g. under
+ * Program Files); made absolute. A mapped drive or a UNC share
  * (\\server\share) is fine as long as Windows can reach it. */
 static void effective_log_dir(wchar_t *out_path) {
     wchar_t chosen[PATHW];
     const wchar_t *env = env_or(L"BB_LOG_DIR", NULL);
     if (env && env[0]) { wcsncpy(chosen, env, PATHW - 1); chosen[PATHW - 1] = 0; }
     else if (settings.log_dir[0]) { wcsncpy(chosen, settings.log_dir, PATHW - 1); chosen[PATHW - 1] = 0; }
-    else join(chosen, PATHW, data, L"logs");
+    else join(chosen, PATHW, root, L"logs");
     if (!GetFullPathNameW(chosen, PATHW, out_path, NULL)) { wcsncpy(out_path, chosen, PATHW - 1); out_path[PATHW - 1] = 0; }
 }
 static void read_version(char *version, size_t n) {
@@ -664,7 +667,7 @@ static int server_start(uint32_t ip) {
         message[1023] = 0; fail(message); return 1;
     }
     /* <data>\logs\server-<time>.log: the server's output (also kept after a failure). */
-    wchar_t logs[PATHW]; join(logs, PATHW, data, L"logs"); ensure_directory(logs);
+    wchar_t logs[PATHW]; effective_log_dir(logs); ensure_directory(logs);
     SYSTEMTIME now; GetLocalTime(&now);
     _snwprintf(server_log, PATHW, L"%ls\\server-%04u%02u%02u_%02u%02u%02u.log", logs, now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
     server_log[PATHW - 1] = 0;
@@ -1902,7 +1905,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
         } }
         else if (id == ID_LOGDIR_BROWSE && !running) {
             wchar_t folder[PATHW];
-            if (pick_folder(L"The log folder (empty: the data folder's logs)", folder)) {
+            if (pick_folder(L"The log folder (empty: logs beside the launcher)", folder)) {
                 SetWindowTextW(control(ID_LOGDIR), folder);
                 wcsncpy(settings.log_dir, folder, PATHW - 1); settings.log_dir[PATHW - 1] = 0;
                 settings_save();

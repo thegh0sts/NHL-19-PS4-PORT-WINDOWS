@@ -87,8 +87,10 @@ new scene.
 
 ### Where your files are
 
-Settings, saves, the shader cache and logs live in `%LOCALAPPDATA%\NHL19Native` (paste that into
-the Explorer address bar). Set `BB_DATA_DIR=.` before starting the launcher to keep everything
+Logs go to the `logs` folder beside `NHL19.exe` (or to `%LOCALAPPDATA%\NHL19Native\logs` if that
+folder can't be written, for example under Program Files; the launcher's Log folder setting picks
+another). Settings, saves and the shader cache live in `%LOCALAPPDATA%\NHL19Native` (paste that
+into the Explorer address bar). Set `BB_DATA_DIR=.` before starting the launcher to keep everything
 beside the program instead.
 
 ### Updating
@@ -211,8 +213,8 @@ issue with:
 
 - your CPU, GPU and driver version, and Windows version
 - what happened, in which mode and where (menu, face-off, intermission...), and what you were doing
-- the log of that session: the newest file in `%LOCALAPPDATA%\NHL19Native\logs\`, or `out/run.txt`
-  when running from source
+- the log of that session: the newest file in the `logs` folder beside `NHL19.exe`, or
+  `out/run.txt` when running from source
 - **your saves**, so the bug can be reproduced:
   1. Close the game.
   2. Open `%LOCALAPPDATA%\NHL19Native` in Explorer.

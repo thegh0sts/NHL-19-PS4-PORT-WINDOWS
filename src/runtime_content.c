@@ -102,7 +102,10 @@ static ABI int32_t temp_format(const char *mount_point) {
 static ABI int32_t temp_space(const char *mount_point,uint64_t *kb) {
     require_initialized();
     if (!mount_point || !kb) return PARAMETER;
-    *kb=1024*1024; return 0; /* 1 GiB free */
+    *kb=1024*1024; /* 1 GiB free */
+    static unsigned shown;
+    if (shown++<16) printf("Runtime: AppContent temporary data space asked for %s: %llu KiB\n",mount_point,(unsigned long long)*kb);
+    return 0;
 }
 static ABI int32_t addcont_mount(uint32_t service,const void *entitlement,char *mount_point) {
     require_initialized(); (void)service; (void)entitlement; (void)mount_point;

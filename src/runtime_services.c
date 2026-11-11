@@ -517,7 +517,35 @@ static int32_t dialog_close(int i) { if (!dialogs[i].initialized) return DIALOG_
 static ABI int32_t msg_close(void) { return dialog_close(1); }
 static ABI int32_t commerce_close(void) { return dialog_close(4); }
 static ABI int32_t invitation_close(void) { return dialog_close(7); }
-static ABI int32_t save_result_ufc(void *result) { if (!dialogs[2].initialized) return DIALOG_NOT_INITIALIZED; if (result) memset(result,0,8); return 0; }
+/* NHL 19: the save-data dialog. The game opens it when a mode save is missing (e.g. "Tournament0"
+ * not found on a read-write mount); on the console that asks the player to confirm a new save, and
+ * the game creates it after "Yes". A zeroed result (button 0, none) made the game report "not
+ * enough system storage". Now the dialog's mode, type and system message are logged and it closes
+ * as if the player chose Yes/OK: OrbisSaveDataDialogResult {mode, result 0 (OK), buttonId 1}.
+ * OrbisSaveDataDialogParam: CommonDialogBaseParam (0x30 bytes), size, mode (+0x34), dispType
+ * (+0x38), then pointers: animParam +0x40, items +0x48, userMsgParam +0x50, sysMsgParam +0x58,
+ * errorCodeParam +0x60 (each message parameter starts with its type / code). */
+static int32_t save_dialog_mode;
+static ABI int32_t save_open_nhl(const unsigned char *p) {
+    int32_t r=save_open(p);
+    if (r || !p) return r;
+    int32_t mode, disp, detail=-1; const int32_t *sys, *err, *user;
+    memcpy(&mode,p+0x34,4); memcpy(&disp,p+0x38,4);
+    memcpy(&user,p+0x50,8); memcpy(&sys,p+0x58,8); memcpy(&err,p+0x60,8);
+    if (mode==2 && user) detail=user[0];
+    else if (mode==3 && sys) detail=sys[0];
+    else if (mode==4 && err) detail=err[0];
+    save_dialog_mode=mode;
+    static const char *const modes[]={"?","list","user message","system message","error code","progress bar"};
+    printf("Runtime: SaveDataDialog: %s (type %d, %s %d): answered Yes/OK\n",
+           mode>=0 && mode<=5 ? modes[mode] : "?",disp,mode==4 ? "error" : "message",detail);
+    return 0;
+}
+static ABI int32_t save_result_ufc(void *result) {
+    if (!dialogs[2].initialized) return DIALOG_NOT_INITIALIZED;
+    if (result) { int32_t v[3]={save_dialog_mode,0,1}; memcpy(result,v,sizeof(v)); }
+    return 0;
+}
 static ABI int32_t net_mac(unsigned char *mac,int flags) { (void)flags; if (!mac) return NET_ENETUNREACH; memset(mac,0,6); return 0; }
 static ABI int32_t net_resolver_error(int32_t rid,int32_t *err) { (void)rid; if (err) *err=51; return 0; }
 static ABI int32_t netctl_result(int32_t type,int32_t *err) { (void)type; if (err) *err=0; return 0; }
@@ -656,7 +684,7 @@ static const RuntimeExport exports[]={
     {"sceMsgDialogUpdateStatus",msg_status}, {"sceMsgDialogTerminate",msg_term},
     {"sceMsgDialogGetResult",msg_result},
     {"sceNetCtlInit",netctl_init}, {"sceNetCtlTerm",netctl_term}, {"sceNetResolverAbort",resolver_abort},
-    {"sceSaveDataDialogInitialize",save_init}, {"sceSaveDataDialogOpen",save_open},
+    {"sceSaveDataDialogInitialize",save_init}, {"sceSaveDataDialogOpen",save_open_nhl},
     {"sceSaveDataDialogUpdateStatus",save_status}, {"sceSaveDataDialogTerminate",save_term},
     {"sceNpProfileDialogInitialize",profile_init}, {"sceNpProfileDialogOpen",profile_open},
     {"sceNpProfileDialogUpdateStatus",profile_status}, {"sceNpProfileDialogTerminate",profile_term},
