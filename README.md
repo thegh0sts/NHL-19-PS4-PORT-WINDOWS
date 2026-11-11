@@ -33,7 +33,7 @@ and HUD drawn, at 60 FPS on a modern PC. Most other modes haven't been tested ye
 | Frame rate | 60 FPS throughout (the game asks for 30 in matches; the port keeps 60) |
 | Player jerseys (cloth) | Calm with the default settings; a slight jitter at the hem in team select |
 | Bearded players | Drawn correctly (since v0.2.0) |
-| Saves | Profile save loads; not tested much further |
+| Saves | Profile and game-mode saves work, without the low-storage warning (since v0.2.1) |
 | Controller | Working (one local player for now) |
 | Local multiplayer (several controllers) | Not yet |
 | Online play | Not available: EA's NHL 19 servers are gone (see [Online](#online)) |
@@ -52,6 +52,7 @@ Found a problem? See [Reporting problems](#reporting-problems).
   - developer switches (frame statistics, Vulkan validation, shader cache, logs)
   - a Steam shortcut, and `--play` to start without the window
 - **In-game overlay** (Insert, or L3+R3 on a controller) to change settings while you play
+- **Hold ○ for 2 seconds** on any screen to quit the game (✕ yes, ○ no)
 - The NHL 19 graphics settings that fix black 3D and shaking jerseys, applied for you
 
 ## Requirements
@@ -186,6 +187,7 @@ putting it in front of the command, for example `BB_FLIP_RATE=-1 bash scripts/ru
 | `BB_LOG_UNRESOLVED=1` | off | Logs every unhandled system call (very large logs) |
 | `BB_FRAME_STATS=1` | off | Frame timing in the log |
 | `BB_REDZONE_SHIFT` | on | Protects the game's stack data from Windows exception handling (see v0.2.0). `0` turns it off, for comparison |
+| `BB_HOLD_CIRCLE_QUIT` | 1 | Holding ○ for 2 seconds asks "Quit NHL 19?". `0` turns it off |
 
 `python3 tools/module_imports.py <module.prx>` lists what a game module needs from the system and
 how much of it the port already provides.
@@ -226,6 +228,37 @@ Please don't attach game files or anything from the `out` folder: they're made f
 can't be shared. Saves are fine to share: they hold only your progress and settings.
 
 ## Version history
+
+### v0.2.1 (2026-11-11)
+
+Fixes for the game modes' saves, a crash fix, and a quicker way out of the game.
+
+**Game**
+- No more low-storage warning when starting Franchise, Season, Playoffs, Tournaments, NHL Threes or
+  Be a Pro: the mode's save is now created and the game is told realistic save sizes
+- Fixed a crash in Be a GM (a graphics memory error when depth and stencil buffers are paired)
+- **Hold ○ for 2 seconds to quit:** a "Quit NHL 19?" box appears on any screen; ✕ (or Enter) quits,
+  ○ (or Esc) goes back to the game. A short press of ○ still goes back a screen as usual.
+  `BB_HOLD_CIRCLE_QUIT=0` turns it off
+
+**Launcher**
+- Logs now go to a `logs` folder beside `NHL19.exe`, so they're easy to find when reporting a
+  problem (or to `%LOCALAPPDATA%\NHL19Native\logs` if that folder can't be written, for example
+  under Program Files)
+
+**Under the hood**
+- Saves are given sizes that add up, as on a PS4 (the space they use, or the space the game asked
+  for, whichever is larger) instead of 1 GiB each; the game totals its saves against its own
+  budget, which the 1 GiB answers overran
+- Opening a mode whose save doesn't exist yet now creates it, and the save dialog's answer matches
+  the question the game asked (Yes / OK)
+- `FindDepthTarget` no longer keeps a reference into the image list across an insert that can move it
+- More save and storage details in the log (mount mode, blocks asked, save sizes)
+
+**Known issues**
+- Main menu hub tiles are still empty (EAWebKit isn't loaded yet)
+- A slight jitter at the bottom of the jerseys in team select
+- Modes other than Play Now and NHL Threes are lightly tested; one local player only; no online play
 
 ### v0.2.0 (2026-11-10)
 

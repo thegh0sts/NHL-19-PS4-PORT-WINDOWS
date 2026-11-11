@@ -71,6 +71,29 @@ std::mutex prompt_mutex;
 std::atomic<bool> prompt_active{false};
 std::string prompt_title, prompt_text;
 
+// Holding ○ (the pad's right face button) for HoldQuitSeconds asks "Quit NHL 19?": ✕ quits,
+// ○ goes back. A short press of ○ still reaches the game as Back. BB_HOLD_CIRCLE_QUIT=0 turns it off.
+// quit_state: 0 none, 1 the question is shown, 2 closed, kept from the game until ○ is let go
+// (otherwise the game would see ○ still held and go back a screen).
+constexpr float HoldQuitSeconds = 2.0f;
+std::atomic<int> quit_state{0};
+std::atomic<long long> circle_down_ms{0}; // when ○ went down (steady clock, ms); 0: not held
+std::atomic<bool> circle_released{false}; // ○ let go since the question appeared
+
+long long NowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+bool HoldQuitEnabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_HOLD_CIRCLE_QUIT");
+        return !env || env[0] != '0';
+    }();
+    return enabled;
+}
+
 // UFC-82: trophy toasts, one at a time for ToastSeconds each, queued by ShowTrophy (any thread).
 struct TrophyToast {
     int id = -1;
@@ -714,6 +737,23 @@ void TextPrompt() {
     ImGui::End();
 }
 
+void QuitPrompt() {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
+                                   viewport->WorkPos.y + viewport->WorkSize.y * 0.5f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowBgAlpha(0.92f);
+    ImGui::Begin("##quitprompt", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoFocusOnAppearing);
+    ImGui::TextUnformatted(BbSettings::MenuText("Quit NHL 19?", "Выйти из NHL 19?"));
+    ImGui::Separator();
+    ImGui::TextUnformatted(BbSettings::MenuText("Cross / A (Enter) = Yes      Circle / B (Esc) = No",
+                                                "Крест / A (Enter) = Да      Круг / B (Esc) = Нет"));
+    ImGui::End();
+}
+
 ImTextureData* ToastIcon(const TrophyToast& toast) {
     if (toast.rgba.empty() || toast.w <= 0 || toast.h <= 0) {
         return nullptr;
@@ -919,6 +959,23 @@ bool HandleEvent(const SDL_Event& event) {
     }
     ImGuiIO& io = ImGui::GetIO();
     const bool is_open = menu_open;
+    if (quit_state == 1 && !is_open &&
+        (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP)) {
+        // The quit question: Enter = yes, Esc = no; other keys stay out of the game meanwhile.
+        if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat) {
+            if (event.key.key == SDLK_RETURN || event.key.key == SDLK_KP_ENTER) {
+                std::printf("Quit: confirmed (Enter)\n");
+                SDL_Event quit{};
+                quit.type = SDL_EVENT_QUIT;
+                SDL_PushEvent(&quit);
+                quit_state = 0;
+            } else if (event.key.key == SDLK_ESCAPE) {
+                std::printf("Quit: cancelled (Esc)\n");
+                quit_state = circle_released ? 0 : 2;
+            }
+        }
+        return true;
+    }
     switch (event.type) {
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP: {
@@ -950,8 +1007,38 @@ bool HandleEvent(const SDL_Event& event) {
             r3_down = down;
         }
         if (down && l3_down && r3_down) {
+            quit_state = 0;
+            circle_down_ms = 0;
             SetOpen(!is_open);
             return true;
+        }
+        if (!is_open && quit_state != 0) {
+            // The quit question (1) or its closing (2): the pad stays out of the game.
+            if (button == SDL_GAMEPAD_BUTTON_EAST && !down) {
+                circle_released = true;
+                if (quit_state == 2) {
+                    quit_state = 0;
+                }
+            } else if (quit_state == 1 && down && button == SDL_GAMEPAD_BUTTON_SOUTH) {
+                std::printf("Quit: confirmed (Cross)\n");
+                SDL_Event quit{};
+                quit.type = SDL_EVENT_QUIT;
+                SDL_PushEvent(&quit);
+                quit_state = 0;
+            } else if (quit_state == 1 && down && button == SDL_GAMEPAD_BUTTON_EAST && circle_released) {
+                std::printf("Quit: cancelled (Circle)\n");
+                circle_released = false;
+                quit_state = 2; // until this press of ○ is let go
+            }
+            return true;
+        }
+        if (!is_open && button == SDL_GAMEPAD_BUTTON_EAST && HoldQuitEnabled()) {
+            // A hold of ○ is timed in Visible(); the press itself still goes to the game.
+            if (!down) {
+                circle_down_ms = 0;
+            } else if (circle_down_ms == 0) {
+                circle_down_ms = NowMs();
+            }
         }
         if (!is_open) {
             return false;
@@ -1005,7 +1092,15 @@ bool HandleEvent(const SDL_Event& event) {
 }
 
 bool Visible() {
-    return initialized && (menu_open || prompt_active || BbSettings::Get().show_fps || toast_waiting || toast_showing);
+    // Called once a frame by the presenter: ○ held long enough asks the quit question.
+    if (long long since = circle_down_ms; since != 0 && quit_state == 0 && !menu_open &&
+                                          NowMs() - since >= (long long)(HoldQuitSeconds * 1000.0f) &&
+                                          circle_down_ms.compare_exchange_strong(since, 0)) {
+        circle_released = false;
+        quit_state = 1;
+        std::printf("Quit: Circle held for %.0f s, asking\n", HoldQuitSeconds);
+    }
+    return initialized && (menu_open || quit_state == 1 || prompt_active || BbSettings::Get().show_fps || toast_waiting || toast_showing);
 }
 
 bool MenuOpen() {
@@ -1018,7 +1113,8 @@ bool TakePadRescan() {
 
 bool CapturesInput() {
     // The text dialog too: keys typed into it (Backspace is the touchpad) stay out of the game.
-    return menu_open || prompt_active;
+    // And the quit question, until the ○ that closed it is let go.
+    return menu_open || prompt_active || quit_state != 0;
 }
 
 void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
@@ -1056,6 +1152,9 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     }
     if (prompt_active && !menu_open) {
         TextPrompt();
+    }
+    if (quit_state == 1 && !menu_open) {
+        QuitPrompt();
     }
     if (toast_showing) {
         Toast(now);
