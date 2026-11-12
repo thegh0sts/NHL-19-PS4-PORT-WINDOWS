@@ -1,0 +1,94 @@
+# NHL 19: the Linux test build (tar.gz and AppImage), source only (no game data).
+# Runs on demand (Actions > linux > Run workflow: the files are kept as a workflow artifact) and
+# for tags like v0.2.1-linux-test1, which also publish a GitHub pre-release with the files and
+# docs/release-notes/linux-test.md as its notes.
+# Built on Arch Linux, like the upstream Linux builds (packaging/windows/deps.lock lists the
+# versions they used); SDL3 is built from the pinned source in deps.lock.
+name: linux
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*-linux*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Linux build and packages
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Build tools and libraries
+        run: |
+          pacman -Syu --noconfirm --needed git cmake ninja pkgconf python glslang spirv-headers \
+            vulkan-headers vulkan-icd-loader sdl3 boost fmt robin-map xxhash zydis miniz patchelf curl \
+            libx11 libxcb libxext libxrandr libxcursor libxi libxfixes libxss libxtst libxkbcommon \
+            wayland wayland-protocols libdecor alsa-lib libpulse pipewire dbus
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Unix line endings
+        # The repository holds most text files with Windows (CRLF) line endings, which bash on
+        # Linux cannot run; the build gets Unix ones, committed locally so the version stays clean.
+        run: |
+          git config --global --add safe.directory '*'
+          python3 - <<'PY'
+          import subprocess
+          out = subprocess.run(['git', 'ls-files', '--eol'], capture_output=True, text=True, check=True).stdout
+          paths = [line.split('\t', 1)[1] for line in out.splitlines() if line.startswith('i/crlf') or line.startswith('i/mixed')]
+          for path in paths:
+              with open(path, 'rb') as f: data = f.read()
+              with open(path, 'wb') as f: f.write(data.replace(b'\r\n', b'\n'))
+          print(f'{len(paths)} files converted to Unix line endings')
+          PY
+          git -c user.name=ci -c user.email=ci@localhost commit -qam 'CI: Unix line endings' || true
+          if [[ $GITHUB_REF_TYPE == tag ]]; then git tag -f "$GITHUB_REF_NAME" >/dev/null; fi
+          git describe --tags --match 'v*' --always
+      - name: Build
+        run: bash build.sh
+      - name: Pinned inputs (SDL source, aerolib.inl)
+        run: |
+          sdl=$(awk '$1 == "SDL" {print $4}' packaging/windows/deps.lock)
+          git init -q out/sdl-src
+          git -C out/sdl-src fetch -q --depth 1 https://github.com/libsdl-org/SDL.git "$sdl"
+          git -C out/sdl-src checkout -q FETCH_HEAD
+          read -r url hash < <(awk '$1 == "aerolib.inl" {print $3, $4}' packaging/windows/deps.lock)
+          curl -fsSL --retry 3 -o out/aerolib.inl "$url"
+          echo "${hash#sha256:}  out/aerolib.inl" | sha256sum -c -
+      - name: Packages
+        run: |
+          curl -fsSL --retry 3 -o out/appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x out/appimagetool
+          BB_SDL_SRC=out/sdl-src BB_AEROLIB=out/aerolib.inl BB_ALLOW_NEWER_GLIBC=1 BB_ALLOW_DIRTY=${{ github.ref_type != 'tag' && '1' || '' }} \
+            bash scripts/package-linux.sh
+          APPIMAGETOOL=$PWD/out/appimagetool bash scripts/package-appimage.sh
+          cat dist/NHL19Native-linux-x86_64.build.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NHL19Native-linux-x86_64
+          path: |
+            dist/NHL19Native-x86_64.AppImage
+            dist/NHL19Native-x86_64.AppImage.sha256
+            dist/NHL19Native-linux-x86_64.tar.gz
+            dist/NHL19Native-linux-x86_64.tar.gz.sha256
+            dist/NHL19Native-linux-x86_64.build.txt
+      - name: Pre-release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: true
+          name: NHL 19 port ${{ github.ref_name }} (Linux test)
+          body_path: docs/release-notes/linux-test.md
+          files: |
+            dist/NHL19Native-x86_64.AppImage
+            dist/NHL19Native-x86_64.AppImage.sha256
+            dist/NHL19Native-linux-x86_64.tar.gz
+            dist/NHL19Native-linux-x86_64.tar.gz.sha256
+            dist/NHL19Native-linux-x86_64.build.txt
