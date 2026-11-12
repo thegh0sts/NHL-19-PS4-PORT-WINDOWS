@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 here=$(cd -- "$(dirname -- "$0")" && pwd)
-# Suppress bytecode writes into the read-only mounted payload. All other writable
-# paths and argument handling come from the unchanged Linux release launcher.
+# No bytecode writes into the read-only mounted payload; everything else is nhl19.sh's.
 export PYTHONDONTWRITEBYTECODE=1
-exec "$here/usr/lib/UFC3Native/ufc3.sh" "$@"
+exec "$here/usr/lib/NHL19Native/nhl19.sh" "$@"

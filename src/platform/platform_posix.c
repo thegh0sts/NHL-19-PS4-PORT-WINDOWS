@@ -211,9 +211,121 @@ static const unsigned char *guest_image;
 static uint64_t guest_image_size;
 static uintptr_t exe_base;
 static void write_all(const char *text) { ssize_t written = write(2, text, strlen(text)); (void)written; }
+/* NHL 19: AMD SSE4a instructions on Intel CPUs (the Linux side of platform_win.c's emulator).
+ * The PS4's Jaguar CPU has SSE4a (EXTRQ, INSERTQ, MOVNTSS, MOVNTSD); Intel CPUs raise SIGILL on
+ * them. A guest instruction of these four is carried out here on the signal context's registers
+ * and the thread continues after it. Register forms of EXTRQ/INSERTQ and the stores of
+ * MOVNTSS/MOVNTSD are covered; anything else (or a segment prefix) is left to the fault report.
+ * BB_SSE4A_LOG=1 prints each emulated site the first time and a running count. */
+static uint64_t *sse4a_gpr(ucontext_t *c, unsigned n) {
+    static const int order[16] = {REG_RAX, REG_RCX, REG_RDX, REG_RBX, REG_RSP, REG_RBP, REG_RSI, REG_RDI,
+                                  REG_R8, REG_R9, REG_R10, REG_R11, REG_R12, REG_R13, REG_R14, REG_R15};
+    return (uint64_t *)&c->uc_mcontext.gregs[order[n & 15]];
+}
+/* An XMM register's low (half 0) or high (half 1) 64 bits in the saved FPU state. */
+static uint64_t sse4a_xmm_get(ucontext_t *c, unsigned n, int half) {
+    uint64_t v; memcpy(&v, &c->uc_mcontext.fpregs->_xmm[n & 15].element[half * 2], 8); return v;
+}
+static void sse4a_xmm_set_low(ucontext_t *c, unsigned n, uint64_t v) {
+    memcpy(&c->uc_mcontext.fpregs->_xmm[n & 15].element[0], &v, 8);
+}
+static uint64_t sse4a_mask(unsigned length) { return length == 0 || length >= 64 ? ~0ull : (1ull << length) - 1; }
+/* The memory operand of the ModRM byte at p (mod != 3): the bytes used from ModRM on; *rip_relative
+ * set when the address is RIP + *out (from the end of the instruction). */
+static int sse4a_address(ucontext_t *c, const unsigned char *p, unsigned rex, uint64_t *out, int *rip_relative) {
+    const unsigned modrm = p[0], mod = modrm >> 6, rm = modrm & 7;
+    int used = 1;
+    uint64_t address = 0;
+    *rip_relative = 0;
+    if (rm == 5 && mod == 0) {
+        int32_t d; memcpy(&d, p + 1, 4);
+        *out = (uint64_t)(int64_t)d;
+        *rip_relative = 1;
+        return 5;
+    }
+    if (rm == 4) {  /* SIB */
+        const unsigned sib = p[1], scale = sib >> 6, index = ((sib >> 3) & 7) | (rex & 2 ? 8 : 0), base = (sib & 7) | (rex & 1 ? 8 : 0);
+        used = 2;
+        if (index != 4) address += *sse4a_gpr(c, index) << scale;
+        if ((sib & 7) == 5 && mod == 0) { int32_t d; memcpy(&d, p + 2, 4); address += (uint64_t)(int64_t)d; used += 4; }
+        else address += *sse4a_gpr(c, base);
+    } else {
+        address = *sse4a_gpr(c, rm | (rex & 1 ? 8 : 0));
+    }
+    if (mod == 1) { address += (uint64_t)(int64_t)(int8_t)p[used]; used += 1; }
+    else if (mod == 2) { int32_t d; memcpy(&d, p + used, 4); address += (uint64_t)(int64_t)d; used += 4; }
+    *out = address;
+    return used;
+}
+static int sse4a_emulate(ucontext_t *c) {
+    if (!c->uc_mcontext.fpregs) return 0;
+    const uintptr_t rip = (uintptr_t)c->uc_mcontext.gregs[REG_RIP];
+    unsigned char code[16];
+    if (!platform_safe_read(rip, code, sizeof code)) return 0;
+    unsigned i = 0, prefix = code[i++], rex = 0;
+    if (prefix != 0x66 && prefix != 0xF2 && prefix != 0xF3) return 0;
+    if ((code[i] & 0xF0) == 0x40) rex = code[i++] & 0x0F;
+    if (code[i++] != 0x0F) return 0;
+    const unsigned op = code[i++], modrm = code[i];
+    const unsigned mod = modrm >> 6, reg = ((modrm >> 3) & 7) | (rex & 4 ? 8 : 0), rm = (modrm & 7) | (rex & 1 ? 8 : 0);
+    const char *name = NULL;
+    if ((op == 0x78 || op == 0x79) && mod == 3 && prefix != 0xF3) {
+        unsigned length, index;
+        if (prefix == 0xF2) {  /* INSERTQ */
+            const uint64_t src_low = sse4a_xmm_get(c, rm, 0), src_high = sse4a_xmm_get(c, rm, 1);
+            if (op == 0x78) { length = code[i + 1] & 63; index = code[i + 2] & 63; i += 3; }
+            else { length = (unsigned)(src_high & 63); index = (unsigned)((src_high >> 8) & 63); i += 1; }
+            const uint64_t mask = sse4a_mask(length);
+            sse4a_xmm_set_low(c, reg, (sse4a_xmm_get(c, reg, 0) & ~(mask << index)) | ((src_low & mask) << index));
+            name = "insertq";
+        } else {  /* EXTRQ (66) */
+            unsigned dst;
+            if (op == 0x78) {
+                if (((modrm >> 3) & 7) != 0) return 0;
+                dst = rm; length = code[i + 1] & 63; index = code[i + 2] & 63; i += 3;
+            } else {
+                const uint64_t src_low = sse4a_xmm_get(c, rm, 0);
+                dst = reg; length = (unsigned)(src_low & 63); index = (unsigned)((src_low >> 8) & 63); i += 1;
+            }
+            sse4a_xmm_set_low(c, dst, (sse4a_xmm_get(c, dst, 0) >> index) & sse4a_mask(length));
+            name = "extrq";
+        }
+    } else if (op == 0x2B && mod != 3 && (prefix == 0xF2 || prefix == 0xF3)) {  /* MOVNTSD / MOVNTSS */
+        uint64_t address;
+        int rip_relative;
+        const int used = sse4a_address(c, code + i, rex, &address, &rip_relative);
+        if (rip_relative) address += rip + i + (unsigned)used;  /* no immediate follows these stores */
+        const uint64_t v = sse4a_xmm_get(c, reg, 0);
+        if (prefix == 0xF2) { memcpy((void *)(uintptr_t)address, &v, 8); name = "movntsd"; }
+        else { const uint32_t w = (uint32_t)v; memcpy((void *)(uintptr_t)address, &w, 4); name = "movntss"; }
+        i += (unsigned)used;
+    } else {
+        return 0;
+    }
+    static int log = -1;
+    static long total;
+    if (log < 0) { const char *e = getenv("BB_SSE4A_LOG"); log = e && e[0] == '1'; }
+    const long n = __atomic_add_fetch(&total, 1, __ATOMIC_RELAXED);
+    char line[160];
+    if (n == 1) {
+        snprintf(line, sizeof line, "SSE4a: emulating AMD-only %s at guest +0x%lx (this CPU lacks SSE4a; BB_SSE4A_LOG=1 for every site)\n",
+                 name, (unsigned long)(rip - (uintptr_t)guest_image));
+        write_all(line);
+    } else if (log) {
+        snprintf(line, sizeof line, "SSE4a: %s at guest +0x%lx (%ld so far)\n", name, (unsigned long)(rip - (uintptr_t)guest_image), n);
+        write_all(line);
+    }
+    if (!(n & (n - 1)) && n >= 1024) { snprintf(line, sizeof line, "SSE4a: %ld instructions emulated so far\n", n); write_all(line); }
+    c->uc_mcontext.gregs[REG_RIP] = (greg_t)(rip + i);
+    return 1;
+}
 static void fault(int sig, siginfo_t *info, void *context) {
     /* GPU page tracking (write-protected guest pages) is resolved first. */
     if (sig == SIGSEGV && gpu_fault && gpu_fault(context, info->si_addr)) return;
+    /* NHL 19: an AMD-only SSE4a instruction in the game on an Intel CPU. */
+    if (sig == SIGILL && guest_image &&
+        (uintptr_t)((ucontext_t *)context)->uc_mcontext.gregs[REG_RIP] - (uintptr_t)guest_image < guest_image_size &&
+        sse4a_emulate(context)) return;
     /* A speculative guest memory read failed: resume its recovery point. */
     bb_fault_jmp_buf *recover = recover_point ? recover_point() : NULL;
     if ((sig == SIGSEGV || sig == SIGBUS) && recover) {

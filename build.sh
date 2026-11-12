@@ -3,7 +3,7 @@ set -euo pipefail
 cd -- "$(dirname -- "$0")"
 mkdir -p out
 # One identity for VERSION and all compiled components; patched submodules do not mark it dirty.
-version=$(git describe --tags --match 'ufc3-v*' --always 2>/dev/null || echo unknown)
+version=$(git describe --tags --match 'v*' --always 2>/dev/null || echo unknown)
 if ! git diff --quiet --ignore-submodules=dirty HEAD -- 2>/dev/null; then version="$version-dirty"; fi
 # Keep Windows runtime builds under ufc3-build's machine-wide build lock too.
 if [[ ${1:-} == --windows-runtime ]]; then

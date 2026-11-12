@@ -39,6 +39,7 @@ and HUD drawn, at 60 FPS on a modern PC. Most other modes haven't been tested ye
 | Online play | Not available: EA's NHL 19 servers are gone (see [Online](#online)) |
 | Trophies | Recorded locally |
 | Intel CPUs | Working: the game's AMD-only SSE4a instructions are emulated |
+| Linux | Test builds only, not tested by the developer (see [Linux](#linux-test-builds)) |
 
 Found a problem? See [Reporting problems](#reporting-problems).
 
@@ -108,6 +109,22 @@ plays offline.
 
 The UFC 3 port has its own replacement server for online fights. NHL 19 uses the same EA online
 system underneath, so a replacement server may be possible later, but it would be a large project.
+
+## Linux (test builds)
+
+The code this port grew from also runs on Linux, and NHL 19 test builds for Linux are made by
+GitHub (`.github/workflows/linux.yml`) as an AppImage and a tar.gz. The developer has no Linux PC, so
+**these builds have only been compiled, not run**: they're published as pre-releases, and reports
+from anyone who tries them are very welcome. See
+[`packaging/linux/README-Linux.md`](packaging/linux/README-Linux.md) for how to start them.
+
+- Same game fixes and settings as the Windows version, and the AMD-only instruction emulation for
+  Intel CPUs. Red-zone protection isn't needed: Linux leaves the stack's red zone alone.
+- No launcher window yet: the game folder is chosen once, and settings are in
+  `~/.local/share/NHL19Native/nhl19.conf`.
+- A test build is made by pushing a tag like `v0.2.1-linux-test1`: the workflow builds it and
+  publishes a pre-release with `docs/release-notes/linux-test.md` as its notes. The workflow can
+  also be run by hand (Actions > linux > Run workflow) to get the files without a release.
 
 ## Release layout
 

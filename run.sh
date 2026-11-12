@@ -46,9 +46,9 @@ if [[ -z ${PYTHON:-} ]]; then
     fi
 fi
 if [[ -z ${PYTHON:-} ]]; then echo 'Install Python 3 or set PYTHON.' >&2; exit 1; fi
-# BB_GAME_DIR: the game's folder (eboot.bin, sce_module, ...); default: orig/CUSA13795, SacredFire's
-# read-only link tree of the merged CTR dump (update 1.21 over the base game).
-game=${BB_GAME_DIR:-orig/CUSA06534}
+# BB_GAME_DIR: the game's folder (eboot.bin, sce_module, ...), with the update merged in
+# (scripts/merge_update.py; packaging/linux/nhl19.sh does it); default: ./nhl19.
+game=${BB_GAME_DIR:-nhl19}
 if [[ ! -f $game/eboot.bin ]]; then echo "No eboot.bin in $game (set BB_GAME_DIR)." >&2; exit 1; fi
 # The game check (scripts/game_check.py) compares the executable image with the supported one
 # (Crash Team Racing Nitro-Fueled CUSA13795 1.21) and names the profile the runtime reads.
@@ -56,7 +56,33 @@ profile=$("$PYTHON" scripts/game_check.py "$game") || { echo "$profile" >&2; exi
 # The update's build (5.05, 6.72+ or ?): the address-keyed diagnostics know the 5.05 build only.
 export BB_GAME_VARIANT=$("$PYTHON" scripts/game_check.py "$game" --variant 2>/dev/null || echo '?')
 export BB_GAME_PROFILE=${profile:-ufc3}
-echo "Game profile: $BB_GAME_PROFILE"
+# The title, update version and modules to link come from the game check's profile.
+read -r title app_version modules < <("$PYTHON" - "$game" <<'PY'
+import sys
+sys.path.insert(0, 'scripts')
+import game_check
+p = game_check.profile(sys.argv[1]) or {}
+print(p.get('title', 'CUSA06534'), p.get('version', '01.14'), ' '.join(p.get('modules', ('libc.prx', 'libSceFios2.prx'))))
+PY
+)
+echo "Game profile: $BB_GAME_PROFILE ($title $app_version), modules: $modules"
+# NHL 19 (the settings of the Windows launcher and scripts/run-msys2.sh, tested there):
+#  - the network mode without a server (BB_ONLINE_SERVER=127.0.0.1): with the runtime's offline
+#    answers the sim thread reads an online-service object that was never made; nothing listens
+#    at that address, so the game finds no EA servers and plays offline. Empty turns it off.
+#  - precise readbacks (2) with linear readbacks: the players render black without the linear
+#    ones, bearded faces leave a streak with 1. Write twins off (they deadlock against them).
+#  - write windows and stepped writes off (the jerseys shake), pre-upload on (main menu tiles).
+#  - 60 FPS throughout at a 60 Hz vblank (BB_FLIP_RATE=-1: the game's own 30 in matches).
+#  - its own intro videos; command-buffer copies left to the runtime's default (as on Windows).
+if [[ $BB_GAME_PROFILE == nhl19 ]]; then
+    [[ -n ${BB_ONLINE_SERVER+set} ]] || export BB_ONLINE_SERVER=127.0.0.1
+    export BB_READBACKS=${BB_READBACKS:-2} BB_READBACK_LINEAR=${BB_READBACK_LINEAR:-1} BB_GPU_WRITE_TWINS=${BB_GPU_WRITE_TWINS:-0}
+    export BB_WRITE_WINDOW=${BB_WRITE_WINDOW:-0} BB_WRITE_STEP=${BB_WRITE_STEP:-0} BB_PREUPLOAD=${BB_PREUPLOAD:-1}
+    export BB_FLIP_RATE=${BB_FLIP_RATE:-0} BB_VBLANK_HZ=${BB_VBLANK_HZ:-60} BB_Z16S8_AS_D16=${BB_Z16S8_AS_D16:-1}
+    export BB_SKIP_MOVIES=${BB_SKIP_MOVIES:-0}
+    echo "NHL 19: readbacks $BB_READBACKS (linear $BB_READBACK_LINEAR), write windows $BB_WRITE_WINDOW, pre-upload $BB_PREUPLOAD, flip rate $BB_FLIP_RATE, online server ${BB_ONLINE_SERVER:-none}"
+fi
 # ufc3: the fight scene renders black without precise readbacks of linear images (the same as
 # shadPS4 issue #4375 for UFC 4, same engine); both are defaults for this game.
 if [[ $BB_GAME_PROFILE == ufc3 ]]; then
@@ -104,7 +130,7 @@ if [[ $game != "$(realpath "$original_game")" ]]; then
 fi
 "$PYTHON" scripts/prepare.py "$game" --out "$out"
 "$PYTHON" scripts/link_libc.py "$game" --out "$out"
-"$PYTHON" scripts/link_modules.py "$game" --out "$out" --modules libc.prx libSceFios2.prx
+"$PYTHON" scripts/link_modules.py "$game" --out "$out" --modules $modules
 # SacredFire: symbol names for this eboot's host-side imports (shadPS4's aerolib list, fetched once).
 aerolib_args=(); [[ -f share/aerolib.inl ]] && aerolib_args=(--aerolib share/aerolib.inl)  # packaged copy
 "$PYTHON" tools/gen_import_names.py --out "$out" "${aerolib_args[@]}"
@@ -115,7 +141,7 @@ aerolib_args=(); [[ -f share/aerolib.inl ]] && aerolib_args=(--aerolib share/aer
 # keys) or patches.json; BB_PATCHES_DIR adds a folder of further shadPS4-format XML files.
 fps=${BB_FPS:-30}
 "$PYTHON" scripts/patches.py --patches-dir "${BB_PATCHES_DIR:-patches}" --patches-config "${BB_PATCHES_CONFIG:-$data/patches.json}" \
-    --app-version 01.14 --title-id CUSA06534 --out "$out" --settings "$BB_CONFIG"
+    --app-version "$app_version" --title-id "$title" --out "$out" --settings "$BB_CONFIG"
 patch_args=(--patches "$out/patches.bin")
 # BB_NEO=1: PS4 Pro mode (sceKernelIsNeoMode, 7-CPU mode, 5568 MiB direct memory); the game then
 # picks its Pro rendering path. Off by default: the Steam Deck is closer to a base PS4.
@@ -127,7 +153,7 @@ echo "PS4 Pro mode: ${BB_NEO} (BB_NEO=1 turns it on)"
 # deletes it first; the fur breakage that once forced a clear per launch is fixed
 # (docs/sacredfire/06-fur.md: geometry specialization and preload fetch shader).
 if [[ ${BB_CLEAR_SHADER_CACHE:-0} == 1 ]]; then
-    rm -rf "${BB_USER_DIR:-$data/user}/cache/CUSA06534"
+    rm -rf "${BB_USER_DIR:-$data/user}/cache/$title"
     echo "Shader cache: cleared for this launch (BB_CLEAR_SHADER_CACHE=1)"
 fi
 # With the 60 FPS patch the game's own limiter paces frames; a 60 Hz virtual vblank would
@@ -213,7 +239,7 @@ export BB_UFFD=${BB_UFFD:-0}
 # The command buffers of each submission are copied when the game submits them and decoded from
 # the copy: while an area loads the game reused that memory before the GPU thread got to it
 # ("Unimplemented PM4 type 0" a few seconds after loading a save). 0 decodes guest memory.
-export BB_COPY_GPU_BUFFERS=${BB_COPY_GPU_BUFFERS:-1}
+[[ $BB_GAME_PROFILE == nhl19 ]] || export BB_COPY_GPU_BUFFERS=${BB_COPY_GPU_BUFFERS:-1}
 # A guest write next to small GPU outputs the GPU is still writing (counters, compute results,
 # up to BB_GPU_WRITE_TWINS_MAX bytes per page) does not wait for the GPU (BufferCache twins).
 export BB_GPU_WRITE_TWINS=${BB_GPU_WRITE_TWINS:-1} BB_GPU_WRITE_TWINS_MAX=${BB_GPU_WRITE_TWINS_MAX:-65536}

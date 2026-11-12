@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=NHL 19 Native
+Comment=Play NHL 19 with your own PS4 game dump
+Exec=AppRun
+Icon=NHL19Native
+Terminal=false
+Categories=Game;SportsGame;
