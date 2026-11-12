@@ -42,21 +42,21 @@ class GameCheckTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_base_game_without_the_update(self):
-        game = self.game('CUSA13795', '01.00')
-        self.assertEqual(game_check.problem(game), ('missing_update', 'CUSA13795', '01.00'))
-        self.assertIn('01.21', game_check.explain(*game_check.problem(game)))
+        game = self.game('CUSA11126', '01.00')
+        self.assertEqual(game_check.problem(game), ('missing_update', 'CUSA11126', '01.00'))
+        self.assertIn('01.60', game_check.explain(*game_check.problem(game)))
 
     def test_update_metadata_with_an_old_executable(self):
-        game = self.game('CUSA13795', '01.21')
+        game = self.game('CUSA11126', '01.60')
         with mock.patch.dict(game_check.OLD_IMAGES, {game_check.image_sha256(game): '01.00'}):
             self.assertEqual(game_check.problem(game)[0], 'wrong_eboot')
             self.assertIsNone(game_check.profile(game))
 
-    def test_other_121_build_is_accepted_as_672(self):
-        # The 1.21 update for firmware 6.72+: another executable, same game.
-        game = self.game('CUSA13795', '01.21')
+    def test_other_build_of_the_update_is_accepted(self):
+        # Another executable with the supported update's param.sfo: accepted, not address-keyed.
+        game = self.game('CUSA11126', '01.60')
         self.assertIsNone(game_check.problem(game))
-        self.assertEqual(game_check.profile(game)['name'], 'ctr')
+        self.assertEqual(game_check.profile(game)['name'], 'nhl19')
         self.assertEqual(game_check.profile(game)['variant'], '6.72+')
         self.assertFalse(game_check.profile(game)['known'])
         with mock.patch.object(game_check, 'KNOWN_672', {game_check.image_sha256(game)}):
@@ -71,19 +71,21 @@ class GameCheckTests(unittest.TestCase):
         self.assertEqual(game_check.problem(self.game('CUSA13795', '01.21', b'junk'))[0], 'unreadable')
 
     def test_supported_image_passes(self):
-        game = self.game('CUSA13795', '01.21')
-        table = {game_check.image_sha256(game): game_check.SUPPORTED[game_check.SUPPORTED_IMAGE]}
-        with mock.patch.object(game_check, 'SUPPORTED', table):
-            self.assertIsNone(game_check.problem(game))
-            self.assertEqual(game_check.profile(game)['name'], 'ctr')
-            self.assertEqual(game_check.profile(game)['variant'], '5.05')
-            self.assertIn('libSceNpToolkit2.prx', game_check.profile(game)['modules'])
+        for image, expected in game_check.SUPPORTED.items():
+            with self.subTest(game=expected['name']):
+                game = self.game(expected['title'], expected['version'])
+                table = {game_check.image_sha256(game): game_check.SUPPORTED[image]}
+                with mock.patch.object(game_check, 'SUPPORTED', table):
+                    self.assertIsNone(game_check.executable_problem(game))  # UFC 3's data files: test_readable_configs_pass
+                    self.assertEqual(game_check.profile(game)['name'], expected['name'])
+                    self.assertEqual(game_check.profile(game)['variant'], '5.05')
+                    self.assertIn('libSceFios2.prx', game_check.profile(game)['modules'])
 
     def test_profile_guess_with_the_check_skipped(self):
-        game = self.game('CUSA13795', '01.00')
+        game = self.game('CUSA11126', '01.00')
         self.assertIsNone(game_check.profile(game))
         with mock.patch.dict(os.environ, {'BB_SKIP_GAME_CHECK': '1'}):
-            self.assertEqual(game_check.profile(game)['name'], 'ctr')
+            self.assertEqual(game_check.profile(game)['name'], 'nhl19')
             self.assertIsNone(game_check.profile(self.game('CUSA03173', '01.09')))
 
     def test_skip_switch(self):

@@ -113,7 +113,12 @@ class SignatureTests(unittest.TestCase):
 
 
 class GamePatchTests(unittest.TestCase):
-    """The bundled CTR patches, chosen through bbport.ini patch_* keys (the in-game menu)."""
+    """The bundled CTR patches, chosen through bbport.ini patch_* keys (the in-game menu). The NHL 19
+    port bundles no game patch file (patches/.CrashTeamRacing.xml.disabled), so these skip."""
+
+    def setUp(self):
+        if not (ROOT / 'patches' / 'CrashTeamRacing.xml').is_file():
+            self.skipTest('no bundled game patch file')
 
     def test_bundled_file_lists_every_menu_patch(self):
         found = external_patches(ROOT / 'patches')

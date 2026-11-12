@@ -64,7 +64,8 @@ import game_check
 p = game_check.profile(sys.argv[1]) or {}
 print(p.get('title', 'CUSA06534'), p.get('version', '01.14'), ' '.join(p.get('modules', ('libc.prx', 'libSceFios2.prx'))))
 PY
-)
+) || true
+title=${title:-CUSA06534} app_version=${app_version:-01.14} modules=${modules:-libc.prx libSceFios2.prx}
 echo "Game profile: $BB_GAME_PROFILE ($title $app_version), modules: $modules"
 # NHL 19 (the settings of the Windows launcher and scripts/run-msys2.sh, tested there):
 #  - the network mode without a server (BB_ONLINE_SERVER=127.0.0.1): with the runtime's offline

@@ -1,2 +1,11 @@
-# Never convert line endings (patch files and scripts must stay byte-exact).
-* -text
+# Text files are stored with Unix line endings (LF) and checked out with them on every system:
+# MSYS2's bash, clang, CMake and Python on Windows all read them, and Linux needs them (bash
+# cannot run a script with Windows line endings). Binary files are detected and left alone.
+* text=auto eol=lf
+# Patches must stay byte-exact.
+*.patch -text
+# Windows-only formats keep Windows line endings.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.sln text eol=crlf
+*.vcxproj text eol=crlf

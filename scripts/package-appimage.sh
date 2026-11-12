@@ -26,8 +26,9 @@ for entry in nhl19.sh run.sh scripts/prepare.py scripts/merge_update.py bin/sacr
 done
 install -m755 packaging/linux/AppRun "$appdir/AppRun"
 sed -i 's/\r$//' "$appdir/AppRun"
-install -m644 "packaging/linux/$product.desktop" "packaging/linux/$product.svg" "$appdir/"
-ln -s "$product.svg" "$appdir/.DirIcon"
+# The icon is a PNG: appimagetool wants .DirIcon to be one (an SVG is refused by newer versions).
+install -m644 "packaging/linux/$product.desktop" "packaging/linux/$product.png" "$appdir/"
+cp "$appdir/$product.png" "$appdir/.DirIcon"
 
 # Python stays on the host, as with the tar.gz. Do not add bin/lib to LD_LIBRARY_PATH here: those
 # libraries belong to the game. APPIMAGE_EXTRACT_AND_RUN lets appimagetool run without FUSE.
