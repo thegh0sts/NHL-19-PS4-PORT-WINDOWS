@@ -366,3 +366,27 @@ target_link_libraries(copy-bounds-test PRIVATE Vulkan::Headers)
 add_executable(driver-cache-blob-test EXCLUDE_FROM_ALL ../tests/test_driver_cache_blob.cpp)
 target_include_directories(driver-cache-blob-test PRIVATE shadps4)
 target_compile_options(driver-cache-blob-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+
+# The launcher window (launcher/imgui, SDL3 + Dear ImGui) for Windows and Linux: the game folder,
+# the settings (sacredfire.ini, shared with the Windows launcher) and Play, which starts the
+# package's own game start (NHL19.exe / nhl19.sh --play). `ninja nhl-launcher`; not part of bbgpu.
+set(BB_LAUNCHER_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../launcher/imgui)
+add_executable(nhl-launcher EXCLUDE_FROM_ALL ${BB_LAUNCHER_SRC}/nhl_launcher.cpp
+    third_party/imgui/imgui.cpp third_party/imgui/imgui_draw.cpp third_party/imgui/imgui_tables.cpp
+    third_party/imgui/imgui_widgets.cpp third_party/imgui/backends/imgui_impl_sdl3.cpp
+    third_party/imgui/backends/imgui_impl_sdlrenderer3.cpp)
+target_include_directories(nhl-launcher PRIVATE ${BB_LAUNCHER_SRC} third_party/imgui third_party/imgui/backends)
+target_link_libraries(nhl-launcher PRIVATE PkgConfig::SDL3)
+target_compile_definitions(nhl-launcher PRIVATE BB_BUILD_VERSION="${BB_BUILD_VERSION}"
+    BB_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans.ttf"
+    BB_BOLD_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans-Bold.ttf")
+# The fonts are assembled into the program (.incbin): a changed font rebuilds it.
+set_source_files_properties(${BB_LAUNCHER_SRC}/nhl_launcher.cpp PROPERTIES OBJECT_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans.ttf;${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans-Bold.ttf")
+set_source_files_properties(${BB_LAUNCHER_SRC}/nhl_launcher.cpp PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra;-Werror")
+if (WIN32)
+    # A window program (no console), with the Windows launcher's icon and DPI-aware manifest.
+    target_sources(nhl-launcher PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../packaging/windows/sacredfire-launcher.rc)
+    set_target_properties(nhl-launcher PROPERTIES WIN32_EXECUTABLE ON)
+    target_compile_definitions(nhl-launcher PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()

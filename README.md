@@ -120,18 +120,29 @@ from anyone who tries them are very welcome. See
 
 - Same game fixes and settings as the Windows version, and the AMD-only instruction emulation for
   Intel CPUs. Red-zone protection isn't needed: Linux leaves the stack's red zone alone.
-- No launcher window yet: the game folder is chosen once, and settings are in
-  `~/.local/share/NHL19Native/nhl19.conf`.
+- The launcher window opens when the AppImage starts: the same new launcher that is in testing on
+  Windows (see below). `nhl19.sh --play` plays without it.
 - A test build is made by pushing a tag like `v0.2.1-linux-test1`: the workflow builds it and
   publishes a pre-release with `docs/release-notes/linux-test.md` as its notes. The workflow can
   also be run by hand (Actions > linux > Run workflow) to get the files without a release.
+
+## The new launcher (testing)
+
+A new launcher window, made with SDL3 and Dear ImGui like the in-game menu, works the same on
+Windows and Linux and with a mouse, a keyboard or a controller (Steam Deck included):
+`launcher/imgui`. It shows the game folder with a check of what's in it, the settings in four tabs,
+and Play. It shares its settings with `NHL19.exe` (`sacredfire.ini` in the data folder), and Play
+starts `NHL19.exe --play` (on Linux `nhl19.sh --play`), so the game starts exactly as from the
+current launcher. On Windows it's `bin\NHL19Launcher.exe` while it's tested; `NHL19.exe` stays the
+main launcher until it can replace it.
 
 ## Release layout
 
 ```
 NHL19Native\
   NHL19.exe             start here (the launcher)
-  bin\                  sacredfire-game.exe (the loader), bb-gpu-capabilities.exe and their DLLs
+  bin\                  sacredfire-game.exe (the loader), bb-gpu-capabilities.exe and their DLLs;
+                        NHL19Launcher.exe, the new launcher window being tested
   python\               embedded Python, used to prepare the game
   scripts\  tools\      the preparation scripts
   patches\              game patches

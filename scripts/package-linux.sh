@@ -10,7 +10,7 @@
 set -euo pipefail
 cd -- "$(dirname -- "$0")/.."
 product=${BB_PRODUCT:-NHL19Native}
-[[ -f out/sacredfire && -f out/gpu/libbbgpu.so && -f out/VERSION ]] || { echo 'Build first: bash build.sh' >&2; exit 1; }
+[[ -f out/sacredfire && -f out/gpu/libbbgpu.so && -f out/nhl-launcher && -f out/VERSION ]] || { echo 'Build first: bash build.sh' >&2; exit 1; }
 built_from=$(cat out/VERSION)
 checkout=$(git describe --tags --match 'v*' --always 2>/dev/null || echo unknown)
 git update-index -q --refresh 2>/dev/null || true
@@ -36,8 +36,9 @@ stage=$work/stage/$product
 rm -rf "$work/stage"
 mkdir -p "$stage/bin/gpu" "$stage/bin/lib" "$stage/scripts" "$stage/tools" "$stage/share" "$stage/patches" "$stage/licenses"
 install -m755 out/sacredfire out/bb-gpu-capabilities "$stage/bin/"
+install -m755 out/nhl-launcher "$stage/bin/nhl19-launcher"
 install -m755 out/gpu/libbbgpu.so "$stage/bin/gpu/"
-strip --strip-debug "$stage/bin/sacredfire" "$stage/bin/bb-gpu-capabilities" "$stage/bin/gpu/libbbgpu.so"
+strip --strip-debug "$stage/bin/sacredfire" "$stage/bin/bb-gpu-capabilities" "$stage/bin/nhl19-launcher" "$stage/bin/gpu/libbbgpu.so"
 cp -L "$work/sdl-build/libSDL3.so.0" "$stage/bin/lib/"
 ldd out/sacredfire out/gpu/libbbgpu.so > "$work/ldd.txt"
 for lib in libfmt.so libminiz.so libxxhash.so libZydis.so libZycore.so libstdc++.so.6 libgcc_s.so.1; do
@@ -51,6 +52,7 @@ done
 # Relative library paths (no build-machine path in the package).
 set_rpath '$ORIGIN/gpu:$ORIGIN/lib' "$stage/bin/sacredfire"
 set_rpath '$ORIGIN/lib' "$stage/bin/bb-gpu-capabilities"
+set_rpath '$ORIGIN/lib' "$stage/bin/nhl19-launcher"
 set_rpath '$ORIGIN/../lib' "$stage/bin/gpu/libbbgpu.so"
 for f in "$stage"/bin/lib/*.so*; do set_rpath '$ORIGIN' "$f"; done
 install -m755 run.sh packaging/linux/nhl19.sh "$stage/"

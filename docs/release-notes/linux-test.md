@@ -4,7 +4,8 @@ what happened, even if it worked: see "Reporting" below.
 
 It's the same NHL 19 port as the Windows v0.2.1 release, built for Linux: the same game fixes and
 settings, hold ○ for 2 seconds to quit, and the AMD-only instruction emulation for Intel CPUs.
-There's no launcher window yet: settings are in a text file.
+It opens a launcher window (new, also in testing on Windows) for the game folder and the
+settings, which works with a mouse, a keyboard or a controller.
 
 **You need**
 - Linux x86-64 (a desktop, or a Steam Deck in desktop mode) with Python 3 and an up-to-date
@@ -14,15 +15,15 @@ There's no launcher window yet: settings are in a text file.
 **Starting**
 1. Download `NHL19Native-x86_64.AppImage`, make it executable (`chmod +x`, or Properties >
    Permissions) and run it.
-2. The first time, choose your `CUSA11126` folder. A `CUSA11126-patch` folder beside it is merged in
-   automatically. Without zenity or kdialog installed, start it from a terminal instead:
-   `./NHL19Native-x86_64.AppImage /path/to/CUSA11126`
+2. In the launcher, choose your `CUSA11126` folder with **Browse...** and press **Play**. A
+   `CUSA11126-patch` folder beside it is merged in automatically. If no window opens, start it from
+   a terminal instead: `./NHL19Native-x86_64.AppImage /path/to/CUSA11126`
 3. The first start prepares the game (a minute or so), and the first match builds the shader cache.
 
 The tar.gz has the same contents, for systems without AppImage support: unpack it and run
 `./nhl19.sh`.
 
-Settings: `~/.local/share/NHL19Native/nhl19.conf`. Saves: `~/.local/share/NHL19Native/user`.
+Settings: `~/.local/share/NHL19Native/sacredfire.ini`. Saves: `~/.local/share/NHL19Native/user`.
 Logs: a `logs` folder beside the AppImage.
 
 **Reporting**

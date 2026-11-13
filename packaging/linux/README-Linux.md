@@ -19,13 +19,17 @@ report how it went, even if it worked.
 ## Starting
 
 AppImage: make `NHL19Native-x86_64.AppImage` executable and run it. tar.gz: unpack it and run
-`./nhl19.sh`. The first time, choose your `CUSA11126` folder (a picker opens with zenity or kdialog
-installed), or pass it on the command line:
+`./nhl19.sh`. The launcher window opens: choose your `CUSA11126` folder with **Browse...** (or type
+it), check the settings, and press **Play**. It works with a controller too: ✕ / A chooses, L1 / R1
+change tabs, Options / Start plays.
 
-    ./nhl19.sh /path/to/CUSA11126
+Without the window (a terminal, or a launcher of your own):
 
-It is remembered. The first start prepares the game (a minute or so), and the first match builds
-the shader cache, so its loading screen can take a minute or two.
+    ./nhl19.sh --play                   plays with the launcher's settings
+    ./nhl19.sh /path/to/CUSA11126       plays that folder and remembers it
+
+The first start prepares the game (a minute or so), and the first match builds the shader cache,
+so its loading screen can take a minute or two.
 
 On a Steam Deck, adding the AppImage to Steam as a non-Steam game should let you play it in game
 mode (not tested yet).
@@ -38,8 +42,8 @@ mode (not tested yet).
 
 ## Files
 
-- Settings: `~/.local/share/NHL19Native/nhl19.conf` (KEY=value lines; any `BB_*` variable set when
-  starting wins)
+- Settings: `~/.local/share/NHL19Native/sacredfire.ini` (the launcher's; the same file as on
+  Windows). Extra `BB_*` variables can go in `nhl19.conf` there; one set when starting wins over both.
 - Saves and the shader cache: `~/.local/share/NHL19Native/user`
 - Logs: a `logs` folder beside the AppImage or `nhl19.sh` (or `~/.local/share/NHL19Native/logs` if
   that one can't be written)

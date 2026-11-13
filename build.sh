@@ -83,6 +83,12 @@ fi
 echo "Built $PWD/out/sacredfire"
 printf '%s\n' "$version" > out/VERSION
 echo "Version: $version (out/VERSION)"
+# The launcher window (launcher/imgui; packaged as bin/nhl19-launcher).
+if ! ninja -C out/gpu nhl-launcher >> out/gpu-build.log 2>&1; then
+    grep -v '^\[' out/gpu-build.log | tail -40 >&2
+    echo 'Launcher build failed (full log: out/gpu-build.log)' >&2; exit 1
+fi
+cp out/gpu/nhl-launcher out/nhl-launcher
 # GPU check for run.sh (live_resolution=auto) and the launcher's gamepad list (--gamepads).
 "$CC" -std=c11 -O2 -Wall -Wextra -Werror "${includes[@]}" tools/gpu_capabilities.c "${libraries[@]}" -o out/bb-gpu-capabilities
 # GPU regressions run serially under ufc3-build's machine-wide lock; no game is launched.

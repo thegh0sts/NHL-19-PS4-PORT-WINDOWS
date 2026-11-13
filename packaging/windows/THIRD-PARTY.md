@@ -16,7 +16,7 @@ source and tool). This file lists what the archive contains besides SacredFire's
 | Dear ImGui | bin/sacredfire-game.exe | MIT | Dear-ImGui-LICENSE.txt |
 | FSR-Vulkan (FireBurn) and AMD FidelityFX SDK | bin/sacredfire-game.exe (upscalers, off by default) | MIT | fsr-vulkan LICENSE |
 | LibAtrac9 | bin/sacredfire-game.exe (audio decoding) | MIT | LibAtrac9-LICENSE |
-| DejaVu fonts | bin/sacredfire-game.exe (in-game menu font) | Bitstream Vera / public domain | dejavu-fonts.github.io |
+| DejaVu fonts | bin/sacredfire-game.exe (in-game menu font), the launcher window (DejaVu Sans and Sans Bold) | Bitstream Vera / public domain | dejavu-fonts.github.io |
 | SDL3 | bin/SDL3.dll | Zlib | SDL3-LICENSE.txt |
 | fmt | bin/sacredfire-game.exe | MIT | fmt-LICENSE.txt |
 | xxHash | bin/sacredfire-game.exe | BSD-2-Clause | xxHash-LICENSE.txt |

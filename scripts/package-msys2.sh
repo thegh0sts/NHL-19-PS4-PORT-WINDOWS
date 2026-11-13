@@ -54,6 +54,10 @@ rm -rf "$root/stage"
 mkdir -p "$stage/bin" "$stage/python" "$stage/share" "$stage/licenses" "$stage/tools"
 llvm-strip --strip-debug -o "$stage/$launcher_exe" "$root/bin/SacredFire.exe"
 for exe in sacredfire-game.exe bb-gpu-capabilities.exe; do llvm-strip --strip-debug -o "$stage/bin/$exe" "$root/bin/$exe"; done
+# The new launcher window (launcher/imgui): bin\NHL19Launcher.exe beside SDL3.dll; Play there starts
+# NHL19.exe --play. NHL19.exe stays the main launcher while the new one is tested.
+new_launcher=bin/${launcher_exe%.exe}Launcher.exe
+[[ -f $root/bin/nhl-launcher.exe ]] && llvm-strip --strip-debug -o "$stage/$new_launcher" "$root/bin/nhl-launcher.exe"
 
 # DLL closure from each PE's import table; Windows' own DLLs are not shipped.
 declare -A seen
@@ -86,6 +90,7 @@ resolve() {
 }
 echo 'package-msys2: DLL closure'
 resolve "$stage/bin/sacredfire-game.exe"; resolve "$stage/bin/bb-gpu-capabilities.exe"; resolve "$stage/$launcher_exe"
+[[ -f $stage/$new_launcher ]] && resolve "$stage/$new_launcher"
 
 # Embeddable Python + the preparation scripts (as package-windows.sh).
 python3 - "$python_zip" "$stage/python" <<'PY'
