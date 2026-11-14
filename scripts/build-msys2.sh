@@ -79,14 +79,23 @@ cmake -S gpu -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
     > "$root/configure-msys2.log" 2>&1 || { tail -40 "$root/configure-msys2.log" >&2; echo "build-msys2: configure failed (log: $root/configure-msys2.log)" >&2; exit 1; }
 echo "build-msys2: configured ($version, LTO ${BB_LTO:-OFF}, AvPlayer ${BB_AVPLAYER:-OFF})"
 
-if ! ninja -C "$build" -j "${BB_JOBS:-$(nproc)}" sacredfire-game sacredfire bb-gpu-capabilities nhl-launcher > "$root/build-msys2.log" 2>&1; then
+if ! ninja -C "$build" -j "${BB_JOBS:-$(nproc)}" sacredfire-game sacredfire bb-gpu-capabilities > "$root/build-msys2.log" 2>&1; then
     grep -v '^\[' "$root/build-msys2.log" | tail -60 >&2
     echo "build-msys2: build failed (full log: $root/build-msys2.log)" >&2
     exit 1
 fi
 
 mkdir -p "$root/bin"
-cp "$build/sacredfire-game.exe" "$build/SacredFire.exe" "$build/bb-gpu-capabilities.exe" "$build/nhl-launcher.exe" "$root/bin/"
+cp "$build/sacredfire-game.exe" "$build/SacredFire.exe" "$build/bb-gpu-capabilities.exe" "$root/bin/"
+# The new launcher window (launcher/imgui), still in testing: optional, so a problem with it never
+# stops the game's build; the package leaves it out when it isn't there.
+rm -f "$root/bin/nhl-launcher.exe"
+if ninja -C "$build" nhl-launcher > "$root/build-launcher-msys2.log" 2>&1; then
+    cp "$build/nhl-launcher.exe" "$root/bin/"
+else
+    grep -v '^\[' "$root/build-launcher-msys2.log" | tail -20 >&2
+    echo "build-msys2: warning: the new launcher (nhl-launcher.exe) didn't build; the game and NHL19.exe are fine (log: $root/build-launcher-msys2.log)" >&2
+fi
 # The MSYS2 DLLs the programs need, next to them (not the ones that come with Windows).
 for exe in "$root"/bin/*.exe; do
     ldd "$exe" | awk '$2 == "=>" && $3 ~ /^\// {print $3}'
@@ -96,4 +105,4 @@ done | { grep -viE '^/c/windows/' || true; } | sort -u | while read -r dll; do
     cp -u "$dll" "$root/bin/"
 done
 printf '%s\n' "$version" > "$root/bin/VERSION"
-echo "build-msys2: $root/bin: sacredfire-game.exe, SacredFire.exe, bb-gpu-capabilities.exe, nhl-launcher.exe + $(ls "$root"/bin/*.dll 2>/dev/null | wc -l) DLLs ($version)"
+echo "build-msys2: $root/bin: sacredfire-game.exe, SacredFire.exe, bb-gpu-capabilities.exe$([[ -f $root/bin/nhl-launcher.exe ]] && echo ", nhl-launcher.exe") + $(ls "$root"/bin/*.dll 2>/dev/null | wc -l) DLLs ($version)"

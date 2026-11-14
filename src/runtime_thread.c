@@ -26,6 +26,7 @@ typedef struct ThreadAttr {
     uint32_t magic;
     int detached, policy, prio, inherit;
     uint64_t stack, guard, affinity;
+    uint64_t stack_addr; /* scePthreadAttrGet of a running thread: its stack's lowest address */
     struct ThreadAttr *next;
 } ThreadAttr;
 typedef struct GuestThread {
@@ -38,6 +39,10 @@ typedef struct GuestThread {
     ThreadAttr attr;
     char name[32];
     int detached, finished, joined, host_owned;
+    /* Where the thread's stack is: its top, recorded by the thread itself when it starts, and the
+     * size it was created with (scePthreadAttrGet + Getstackaddr/Getstacksize). */
+    _Atomic uintptr_t stack_top;
+    uint64_t stack_size;
     jmp_buf exit_jump;
     struct GuestThread *next;
 } GuestThread;
@@ -79,6 +84,8 @@ static void attach(GuestThread *t) {
     prepare_tcb(t);
     platform_thread_publish_tcb(t->tcb);
     current=t;
+    if (!t->stack_size) t->stack_size=t->attr.stack;
+    atomic_store_explicit(&t->stack_top,platform_thread_stack_top(),memory_order_release);
     runtime_fp_thread_setup(); /* BB_DETERMINISTIC_FP: Orbis' MXCSR and x87 control word */
 }
 static GuestThread *new_thread(void) {
@@ -149,14 +156,25 @@ static ABI int32_t attr_destroy(ThreadAttr **slot) {
     pthread_mutex_unlock(&lock);
     free(a); *slot=NULL; return 0;
 }
+/* NHL 19 and 21: the games' HangMonitor scans the stacks of the threads it watches for return
+ * addresses, from Getstackaddr + Getstacksize down to Getstackaddr. A thread's real stack is reported: the
+ * size it was created with, below the top the thread recorded when it started (a thread that has
+ * only just been created is waited for, briefly). A stack address of 0 made it scan 0..64 KiB. */
 static ABI int32_t attr_get(void *thread,ThreadAttr **out) {
     ThreadAttr *a=find_attr(out);
     if (!a || !thread) return ERR(22);
     GuestThread *t=find_thread(thread);
     if (!t) return ERR(3);
+    uintptr_t top=atomic_load_explicit(&t->stack_top,memory_order_acquire);
+    for (int i=0; !top && !t->finished && i<1000; ++i) {
+        platform_sleep_ns(100000);
+        top=atomic_load_explicit(&t->stack_top,memory_order_acquire);
+    }
     ThreadAttr *next=a->next;
     *a=t->attr; a->magic=ATTR_MAGIC; a->next=next;
     a->detached=t->detached;
+    if (top && t->stack_size && t->stack_size<top) { a->stack=t->stack_size; a->stack_addr=top-t->stack_size; }
+    else a->stack_addr=0;
     return 0;
 }
 static ABI int32_t attr_set_stack(ThreadAttr **slot,uint64_t size) {
@@ -238,6 +256,7 @@ static int32_t create(GuestThread **out,ThreadAttr **attr_slot,GuestEntry entry,
     pthread_attr_t host;
     pthread_attr_init(&host);
     uint64_t stack=t->attr.stack<MIN_STACK ? MIN_STACK : t->attr.stack;
+    t->stack_size=stack;
     /* Stacks below 1 TiB as on PS4, fully committed (guest code packs stack addresses and has no
      * stack probes): platform_thread_stack. */
     size_t stack_bytes=(size_t)stack+STACK_MARGIN;
@@ -341,14 +360,17 @@ static ABI int32_t posix_setschedparam(GuestThread *t,int32_t policy,const Guest
 }
 
 /* UFC 3: stack address queries (the runtime allocates every stack itself, so a caller-provided
- * address is ignored and its size kept), sce* scheduling parameters and cancel state. */
+ * address is ignored and its size kept), sce* scheduling parameters and cancel state. The address
+ * is known only for an attribute filled by scePthreadAttrGet from a running thread (NULL else). */
 static ABI int32_t attr_get_stack_full(ThreadAttr **slot,void **addr,uint64_t *size) {
-    if (!addr) return ERR(22);
-    *addr=NULL; return attr_get_stack(slot,size);
+    ThreadAttr *a=find_attr(slot);
+    if (!a || !addr || !size) return ERR(22);
+    *addr=(void *)(uintptr_t)a->stack_addr; *size=a->stack; return 0;
 }
 static ABI int32_t attr_get_stack_addr(ThreadAttr **slot,void **addr) {
-    if (!slot || !*slot || !addr) return ERR(22);
-    *addr=NULL; return 0;
+    ThreadAttr *a=find_attr(slot);
+    if (!a || !addr) return ERR(22);
+    *addr=(void *)(uintptr_t)a->stack_addr; return 0;
 }
 static ABI int32_t attr_set_stack_full(ThreadAttr **slot,void *addr,uint64_t size) {
     static _Atomic unsigned notes;

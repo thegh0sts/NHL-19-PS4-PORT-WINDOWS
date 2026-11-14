@@ -257,6 +257,15 @@ can't be shared. Saves are fine to share: they hold only your progress and setti
 
 ## Version history
 
+### v0.2.2 (2026-11-14)
+
+- Fixed a crash when the game's watchdog (HangMonitor) notices a slow thread: it read that
+  thread's stack at the wrong address, because the port didn't report where thread stacks are
+  (found in the NHL 21 port, which shares this code)
+- New launcher window in testing, `bin\NHL19Launcher.exe` (see [The new launcher](#the-new-launcher-testing)):
+  same settings as `NHL19.exe`, and Play starts `NHL19.exe --play`
+- Linux test builds (AppImage and tar.gz) as separate pre-releases
+
 ### v0.2.1 (2026-11-11)
 
 Fixes for the game modes' saves, a crash fix, and a quicker way out of the game.
