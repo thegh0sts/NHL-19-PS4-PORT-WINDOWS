@@ -7,5 +7,5 @@
   "status": "playable",
   "targets": ["Windows"],
   "toolchain": "Bbport",
-  "maintainers": "thegh0sts",
+  "maintainers": "thegh0sts"
 }
