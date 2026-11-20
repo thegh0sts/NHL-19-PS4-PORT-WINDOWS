@@ -5,7 +5,7 @@
   "system": "PS4",
   "type": "recomp",
   "status": "playable",
-  "targets": ["Windows"],
+  "targets": ["Windows","Linux"],
   "toolchain": "Bbport",
   "maintainers": "thegh0sts"
 }
