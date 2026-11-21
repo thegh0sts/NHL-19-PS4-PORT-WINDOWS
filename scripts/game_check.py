@@ -27,7 +27,9 @@ SUPPORTED = {
     # NHL 19 CUSA11126 (US, UP0006) 1.60, SDK 5.50: same engine family as UFC 3 (EA Sports Ignite).
     '3ff8bd90d63536e6757d8a559a8770cf930ebb1aa2c851ed99d7ff4da763b620': dict(
         name='nhl19', title='CUSA11126', version='01.60', game='NHL 19', update='CUSA11126-patch',
-        modules=('libc.prx', 'libSceFios2.prx'), patches=False),
+        # EAWebKit (the embedded browser) is loaded by the online login with sceKernelLoadStartModule
+        # (/app0/nhl/data/kettle/EAWebKit.prx): linked here, the runtime answers that load with it.
+        modules=('libc.prx', 'libSceFios2.prx', 'nhl/data/kettle/eawebkit.prx'), patches=False),
 }
 BY_TITLE = {p['title']: p for p in SUPPORTED.values()}
 # Images that are known NOT to be 1.14: the base game's executable (1.00). With a 1.14 param.sfo

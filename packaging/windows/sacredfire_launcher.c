@@ -862,8 +862,11 @@ static DWORD play_impl(const wchar_t *const *extra, int extra_count) {
     const wchar_t *prepare[] = {game, L"--out", out};
     if (script(L"scripts", L"prepare.py", prepare, 3, NULL, 0)) { fail(L"prepare.py failed (see the log)"); return 2; }
     if (script(L"scripts", L"link_libc.py", prepare, 3, NULL, 0)) { fail(L"link_libc.py failed (see the log)"); return 2; }
-    const wchar_t *link_args[] = {game, L"--out", out, L"--modules", L"libc.prx", L"libSceFios2.prx"};
-    if (script(L"scripts", L"link_modules.py", link_args, 6, NULL, 0)) { fail(L"link_modules.py failed (see the log)"); return 2; }
+    /* NHL 19: EAWebKit too (the online login loads it at run time; the runtime answers that load
+     * with the linked copy). Same list as scripts/game_check.py. */
+    const wchar_t *link_args[] = {game, L"--out", out, L"--modules", L"libc.prx", L"libSceFios2.prx",
+                                  L"nhl/data/kettle/eawebkit.prx"};
+    if (script(L"scripts", L"link_modules.py", link_args, 7, NULL, 0)) { fail(L"link_modules.py failed (see the log)"); return 2; }
     wchar_t aerolib[PATHW]; join(aerolib, PATHW, root, L"share\\aerolib.inl");
     const wchar_t *names_args[] = {L"--out", out, L"--aerolib", aerolib};
     if (script(L"tools", L"gen_import_names.py", names_args, 4, NULL, 0)) { fail(L"gen_import_names.py failed (see the log)"); return 2; }

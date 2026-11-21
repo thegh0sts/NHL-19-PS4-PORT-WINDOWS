@@ -98,6 +98,231 @@ static void protect(void *p, size_t size, unsigned flags) {
     int mode = ((flags & 4) ? PROT_READ : 0) | ((flags & 2) ? PROT_WRITE : 0) | ((flags & 1) ? PROT_EXEC : 0);
     if (platform_protect(p, size, mode)) fail("changing page protection failed");
 }
+/* BB_TRACE_CALLS=1: every PS4 system function the runtime implements is reached through a stub
+ * that logs the call (its name and how often it has been called), to see what the game polls or
+ * waits on. The first BB_TRACE_FIRST calls of each (default 20) are logged, then each power of
+ * two. The stub keeps every argument register (rdi..r9, rax, xmm0-7) and jumps to the function. */
+static uint32_t *trace_counts;
+static uint32_t trace_first = 20;
+static uint64_t trace_start_ns;
+static unsigned char *trace_stubs;
+enum { TRACE_STUB = 192 }; /* 166 bytes used */
+static ABI void trace_call(uint32_t id) {
+    const uint32_t n = __atomic_add_fetch(&trace_counts[id], 1, __ATOMIC_RELAXED);
+    if (n > trace_first && (n & (n - 1))) return;
+    const char *api = runtime_import_name(names[id]);
+    printf("Trace %8.3f s: %s #%u\n", (double)(platform_monotonic_ns() - trace_start_ns) / 1e9,
+           api ? api : names[id], n);
+}
+static uintptr_t trace_stub(uint32_t id, uintptr_t target) {
+    unsigned char *t = trace_stubs + (size_t)id * TRACE_STUB, *p = t;
+    static const unsigned char save[] = {0x57, 0x56, 0x52, 0x51, 0x41, 0x50, 0x41, 0x51, 0x50, 0x41, 0x52, 0x41, 0x53,
+                                         0x48, 0x81, 0xec, 0x80, 0x00, 0x00, 0x00}; /* push x9 (rsp 16-aligned), sub rsp,128 */
+    memcpy(p, save, sizeof save); p += sizeof save;
+    for (int i = 0; i < 8; ++i) { *p++ = 0xf3; *p++ = 0x0f; *p++ = 0x7f; *p++ = (unsigned char)(0x44 | i << 3); *p++ = 0x24; *p++ = (unsigned char)(16 * i); }
+    *p++ = 0xbf; memcpy(p, &id, 4); p += 4;                                   /* mov edi, id */
+    const uintptr_t logger = (uintptr_t)trace_call;
+    *p++ = 0x48; *p++ = 0xb8; memcpy(p, &logger, 8); p += 8;                  /* movabs rax, trace_call */
+    *p++ = 0xff; *p++ = 0xd0;                                                 /* call rax */
+    for (int i = 0; i < 8; ++i) { *p++ = 0xf3; *p++ = 0x0f; *p++ = 0x6f; *p++ = (unsigned char)(0x44 | i << 3); *p++ = 0x24; *p++ = (unsigned char)(16 * i); }
+    static const unsigned char restore[] = {0x48, 0x81, 0xc4, 0x80, 0x00, 0x00, 0x00,               /* add rsp,128 */
+                                            0x41, 0x5b, 0x41, 0x5a, 0x58, 0x41, 0x59, 0x41, 0x58, 0x59, 0x5a, 0x5e, 0x5f};
+    memcpy(p, restore, sizeof restore); p += sizeof restore;
+    *p++ = 0x49; *p++ = 0xbb; memcpy(p, &target, 8); p += 8;                  /* movabs r11, target */
+    *p++ = 0x41; *p++ = 0xff; *p++ = 0xe3;                                    /* jmp r11 */
+    if (p - t > TRACE_STUB) fail("trace stub too long");
+    return (uintptr_t)t;
+}
+/* BB_GAME_LOG=1 (NHL 19): the game's own debug messages, printed as "Game log: ...". Its EA
+ * libraries format every message with one function (text 0x45c1750: string, format, va_list);
+ * retail builds then throw the text away. Its entry jumps to a thunk that prints the message and
+ * then runs the 20 moved prologue bytes and continues, so the game is unchanged. The va_list is
+ * the guest's System V one: gp_offset, fp_offset, overflow area, register save area. */
+static int mapped(Segment *segments, uint64_t count, uint64_t address, uint64_t bytes);
+typedef struct { uint32_t gp, fp; unsigned char *overflow, *save; } GuestVaList;
+static uint64_t game_va_int(GuestVaList *v) {
+    uint64_t x;
+    if (v->gp < 48) { memcpy(&x, v->save + v->gp, 8); v->gp += 8; }
+    else { memcpy(&x, v->overflow, 8); v->overflow += 8; }
+    return x;
+}
+static double game_va_double(GuestVaList *v) {
+    double x;
+    if (v->fp < 176) { memcpy(&x, v->save + v->fp, 8); v->fp += 16; }
+    else { memcpy(&x, v->overflow, 8); v->overflow += 8; }
+    return x;
+}
+static ABI void game_log(const char *fmt, const GuestVaList *va) {
+    if (!fmt || (uintptr_t)fmt < 0x10000) return;
+    GuestVaList v = *va;
+    char out[1024], spec[32];
+    size_t n = 0;
+    for (const char *f = fmt; *f && n < sizeof out - 1;) {
+        if (*f != '%') { out[n++] = *f++; continue; }
+        const char *start = f++;
+        if (*f == '%') { out[n++] = '%'; ++f; continue; }
+        int star_w = 0, star_p = 0, length = 0; /* 1 h, 2 hh, 3 l/ll/z/j/t/q */
+        while (*f && strchr("-+ #0", *f)) ++f;
+        if (*f == '*') { star_w = 1; ++f; } else while (*f >= '0' && *f <= '9') ++f;
+        if (*f == '.') { ++f; if (*f == '*') { star_p = 1; ++f; } else while (*f >= '0' && *f <= '9') ++f; }
+        for (;; ++f) {
+            if (*f == 'h') length = length == 1 ? 2 : 1;
+            else if (*f && strchr("lzjtqL", *f)) length = 3;
+            else break;
+        }
+        const char c = *f;
+        if (!c) break;
+        ++f;
+        /* the spec without its length letters, then this host's own length */
+        size_t k = 0;
+        for (const char *q = start; q < f - 1 && k < sizeof spec - 4; ++q)
+            if (!strchr("hlzjtqL", *q)) spec[k++] = *q;
+        int w = star_w ? (int)game_va_int(&v) : 0, pr = star_p ? (int)game_va_int(&v) : 0;
+        char piece[600];
+        int m;
+        if (strchr("diouxXc", c)) {
+            uint64_t x = game_va_int(&v);
+            if (c == 'c') x = (unsigned char)x;
+            else if (length == 1) x = (c == 'd' || c == 'i') ? (uint64_t)(int64_t)(int16_t)x : (uint16_t)x;
+            else if (length == 2) x = (c == 'd' || c == 'i') ? (uint64_t)(int64_t)(int8_t)x : (uint8_t)x;
+            else if (length == 0) x = (c == 'd' || c == 'i') ? (uint64_t)(int64_t)(int32_t)x : (uint32_t)x;
+            if (c != 'c') { spec[k++] = 'l'; spec[k++] = 'l'; }
+            spec[k++] = c; spec[k] = 0;
+            if (c == 'c') m = star_w ? (star_p ? snprintf(piece, sizeof piece, spec, w, pr, (int)x) : snprintf(piece, sizeof piece, spec, w, (int)x))
+                                     : (star_p ? snprintf(piece, sizeof piece, spec, pr, (int)x) : snprintf(piece, sizeof piece, spec, (int)x));
+            else m = star_w ? (star_p ? snprintf(piece, sizeof piece, spec, w, pr, (long long)x) : snprintf(piece, sizeof piece, spec, w, (long long)x))
+                            : (star_p ? snprintf(piece, sizeof piece, spec, pr, (long long)x) : snprintf(piece, sizeof piece, spec, (long long)x));
+        } else if (strchr("fFeEgGaA", c)) {
+            if (length == 3 && strchr(start, 'L') && strchr(start, 'L') < f) { snprintf(out + n, sizeof out - n, "<long double>"); n = strlen(out); break; }
+            double x = game_va_double(&v);
+            spec[k++] = c; spec[k] = 0;
+            m = star_w ? (star_p ? snprintf(piece, sizeof piece, spec, w, pr, x) : snprintf(piece, sizeof piece, spec, w, x))
+                       : (star_p ? snprintf(piece, sizeof piece, spec, pr, x) : snprintf(piece, sizeof piece, spec, x));
+        } else if (c == 's') {
+            const char *x = (const char *)(uintptr_t)game_va_int(&v);
+            if (!x) x = "(null)";
+            else if ((uintptr_t)x < 0x10000 || length == 3) x = "(?)"; /* wide strings are not shown */
+            spec[k++] = 's'; spec[k] = 0;
+            m = star_w ? (star_p ? snprintf(piece, sizeof piece, spec, w, pr, x) : snprintf(piece, sizeof piece, spec, w, x))
+                       : (star_p ? snprintf(piece, sizeof piece, spec, pr, x) : snprintf(piece, sizeof piece, spec, x));
+        } else if (c == 'p') {
+            m = snprintf(piece, sizeof piece, "0x%llx", (unsigned long long)game_va_int(&v));
+        } else if (c == 'n') {
+            (void)game_va_int(&v); m = 0; piece[0] = 0;
+        } else { m = snprintf(piece, sizeof piece, "%.*s", (int)(f - start), start); }
+        if (m < 0) m = 0;
+        for (int i = 0; i < m && piece[i] && n < sizeof out - 1; ++i) out[n++] = piece[i];
+    }
+    while (n && (out[n - 1] == '\n' || out[n - 1] == '\r')) --n;
+    out[n] = 0;
+    for (size_t i = 0; i < n; ++i) if (out[i] == '\n' || out[i] == '\r') out[i] = ' ';
+    printf("Game log: %s\n", out);
+    fflush(stdout);
+}
+/* Three entries are hooked (the third below). 0x45c1750 (string, format, va_list) formats the identity library's
+ * messages. 0x45fbb30 (logger, level, format, ...) is the sports login service's logger: its
+ * thunk keeps the argument registers in a System V register save area and points a va_list at
+ * it and at the caller's stack arguments. Each entry's first instructions move into the thunk. */
+/* 0x45c0f60 (session, result, response) receives the identity library's Login result: a non-zero
+ * code at result+0x1c goes to the game's listener with the message at result+0x20 (never logged);
+ * zero goes on to the service scope check ("service.%s"). Its hook prints which one it was. */
+static ABI void game_login_result(void *session, const unsigned char *result, const void *response) {
+    (void)session; (void)response;
+    if (!result || (uintptr_t)result < 0x10000) return;
+    int32_t code; uint32_t id; const char *message;
+    memcpy(&code, result + 0x1c, 4); memcpy(&id, result + 8, 4); memcpy(&message, result + 0x20, 8);
+    if (!code) { puts("Game log: identity Login result: success"); fflush(stdout); return; }
+    if (!message || (uintptr_t)message < 0x10000) message = "(no message)";
+    printf("Game log: identity Login result: error %d (0x%x), task %u: %.400s\n", code, (unsigned)code, id, message);
+    fflush(stdout);
+}
+/* kind 0: (string, format, va_list); 1: (logger, level, format, ...); 2: handler(rdi, rsi, rdx). */
+typedef struct { uint64_t text; unsigned char moved[24]; unsigned length; int kind; } GameLogHook;
+static const GameLogHook game_log_hooks[] = {
+    {0x45c1750, {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, /* push rbp; mov rbp,rsp; push r15..r12, rbx */
+                 0x48, 0x81, 0xec, 0x88, 0x00, 0x00, 0x00}, 20, 0},                               /* sub rsp,0x88 */
+    {0x45fbb30, {0x55, 0x48, 0x89, 0xe5, 0x53, 0x48, 0x81, 0xec, 0xd8, 0x00, 0x00, 0x00,           /* push rbp; mov rbp,rsp; push rbx; sub rsp,0xd8 */
+                 0x84, 0xc0}, 14, 1},                                                               /* test al,al (flags kept for its je) */
+    {0x45c0f60, {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, /* push rbp; mov rbp,rsp; push r15..r12, rbx */
+                 0x48, 0x83, 0xec, 0x68}, 17, 2},                                                   /* sub rsp,0x68 */
+};
+enum { GAME_LOG_THUNK = 512 }; /* about 320 bytes used */
+static unsigned char *game_log_thunk;
+static unsigned char *game_log_emit(unsigned char *p, const void *bytes, size_t n) { memcpy(p, bytes, n); return p + n; }
+static void game_log_install(unsigned char *base, Segment *segments, uint64_t ns) {
+    const char *env = getenv("BB_GAME_LOG");
+    if (!env || !*env || !strcmp(env, "0")) return;
+    const size_t count = sizeof game_log_hooks / sizeof *game_log_hooks;
+    unsigned hooked = 0;
+    for (size_t h = 0; h < count; ++h) {
+        const GameLogHook *k = &game_log_hooks[h];
+        if (!mapped(segments, ns, k->text, k->length) || memcmp(base + k->text, k->moved, k->length)) {
+            printf("Game log (BB_GAME_LOG): no NHL 19 logger at 0x%llx; not hooked\n", (unsigned long long)k->text);
+            continue;
+        }
+        if (!game_log_thunk) game_log_thunk = allocate(page_size);
+        unsigned char *t = game_log_thunk + h * GAME_LOG_THUNK, *p = t;
+        if (k->kind != 1) {
+            static const unsigned char head[] = {
+                0x57, 0x56, 0x52, 0x51, 0x41, 0x50, 0x41, 0x51, 0x50, /* push rdi rsi rdx rcx r8 r9 rax: rsp 16-aligned */
+                0x48, 0x89, 0xf7,                                     /* mov rdi,rsi (format) */
+                0x48, 0x89, 0xd6};                                    /* mov rsi,rdx (va_list) */
+            p = game_log_emit(p, head, k->kind == 2 ? 9 : sizeof head); /* kind 2 keeps rdi, rsi, rdx */
+        } else {
+            /* sub rsp,0xd8 (16-aligned); [0..47] rdi..r9, [48..175] xmm0-7, [176..199] va_list, [200] rax */
+            static const unsigned char head[] = {
+                0x48, 0x81, 0xec, 0xd8, 0x00, 0x00, 0x00,
+                0x48, 0x89, 0x3c, 0x24, 0x48, 0x89, 0x74, 0x24, 0x08, 0x48, 0x89, 0x54, 0x24, 0x10, /* mov [rsp],rdi; [rsp+8],rsi; [rsp+16],rdx */
+                0x48, 0x89, 0x4c, 0x24, 0x18, 0x4c, 0x89, 0x44, 0x24, 0x20, 0x4c, 0x89, 0x4c, 0x24, 0x28, /* rcx, r8, r9 */
+                0x48, 0x89, 0x84, 0x24, 0xc8, 0x00, 0x00, 0x00};       /* mov [rsp+200],rax */
+            p = game_log_emit(p, head, sizeof head);
+            for (int i = 0; i < 8; ++i) { /* movdqu [rsp+48+16i], xmm_i */
+                const unsigned char x[] = {0xf3, 0x0f, 0x7f, (unsigned char)(0x84 | i << 3), 0x24, (unsigned char)(48 + 16 * i), 0, 0, 0};
+                p = game_log_emit(p, x, sizeof x);
+            }
+            static const unsigned char va[] = {
+                0xc7, 0x84, 0x24, 0xb0, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, /* va.gp = 24: rdi, rsi, rdx named */
+                0xc7, 0x84, 0x24, 0xb4, 0x00, 0x00, 0x00, 0x30, 0x00, 0x00, 0x00, /* va.fp = 48 */
+                0x48, 0x8d, 0x84, 0x24, 0xe0, 0x00, 0x00, 0x00,                   /* lea rax,[rsp+0xe0]: caller's stack arguments */
+                0x48, 0x89, 0x84, 0x24, 0xb8, 0x00, 0x00, 0x00,                   /* va.overflow */
+                0x48, 0x89, 0xa4, 0x24, 0xc0, 0x00, 0x00, 0x00,                   /* va.save = rsp */
+                0x48, 0x8b, 0x7c, 0x24, 0x10,                                     /* mov rdi,[rsp+16] (format) */
+                0x48, 0x8d, 0xb4, 0x24, 0xb0, 0x00, 0x00, 0x00};                  /* lea rsi,[rsp+176] (va_list) */
+            p = game_log_emit(p, va, sizeof va);
+        }
+        const uintptr_t logger = k->kind == 2 ? (uintptr_t)game_login_result : (uintptr_t)game_log;
+        *p++ = 0x48; *p++ = 0xb8; memcpy(p, &logger, 8); p += 8; /* movabs rax, handler */
+        *p++ = 0xff; *p++ = 0xd0;                                /* call rax */
+        if (k->kind != 1) {
+            static const unsigned char tail[] = {0x58, 0x41, 0x59, 0x41, 0x58, 0x59, 0x5a, 0x5e, 0x5f}; /* pop in reverse */
+            p = game_log_emit(p, tail, sizeof tail);
+        } else {
+            for (int i = 0; i < 8; ++i) { /* movdqu xmm_i, [rsp+48+16i] */
+                const unsigned char x[] = {0xf3, 0x0f, 0x6f, (unsigned char)(0x84 | i << 3), 0x24, (unsigned char)(48 + 16 * i), 0, 0, 0};
+                p = game_log_emit(p, x, sizeof x);
+            }
+            static const unsigned char tail[] = {
+                0x48, 0x8b, 0x3c, 0x24, 0x48, 0x8b, 0x74, 0x24, 0x08, 0x48, 0x8b, 0x54, 0x24, 0x10,
+                0x48, 0x8b, 0x4c, 0x24, 0x18, 0x4c, 0x8b, 0x44, 0x24, 0x20, 0x4c, 0x8b, 0x4c, 0x24, 0x28,
+                0x48, 0x8b, 0x84, 0x24, 0xc8, 0x00, 0x00, 0x00,
+                0x48, 0x81, 0xc4, 0xd8, 0x00, 0x00, 0x00};             /* add rsp,0xd8 */
+            p = game_log_emit(p, tail, sizeof tail);
+        }
+        p = game_log_emit(p, k->moved, k->length);
+        const uintptr_t back = (uintptr_t)(base + k->text + k->length);
+        *p++ = 0x49; *p++ = 0xbb; memcpy(p, &back, 8); p += 8;  /* movabs r11, entry + moved */
+        *p++ = 0x41; *p++ = 0xff; *p++ = 0xe3;                   /* jmp r11 */
+        if (p - t > GAME_LOG_THUNK) fail("game log thunk too long");
+        unsigned char *e = base + k->text;
+        const uintptr_t thunk = (uintptr_t)t;
+        e[0] = 0x49; e[1] = 0xbb; memcpy(e + 2, &thunk, 8);      /* movabs r11, thunk */
+        e[10] = 0x41; e[11] = 0xff; e[12] = 0xe3;                /* jmp r11 */
+        memset(e + 13, 0x90, k->length - 13);
+        ++hooked;
+    }
+    if (hooked) printf("Game log (BB_GAME_LOG): %u of %u loggers hooked; the game's own debug messages are printed as \"Game log:\" lines\n",
+                       hooked, (unsigned)count);
+}
 static ABI __attribute__((noreturn)) void unresolved(uint32_t id, uintptr_t argument) {
     if (id >= import_count) fail("bad import trap index");
     printf("STOP: first unsupported PS4 import: %s (index %u)\n", names[id], id);
@@ -340,6 +565,7 @@ int main(int argc, char **argv) {
     platform_watchdog_start(timeout_seconds, NULL); /* 0 disables the watchdog */
     FILE *f = fopen(argv[1], "rb");
     if (!f) fail("cannot open boot file; run prepare.py first");
+    runtime_set_linked_modules(argv[1]);
     char magic[8];
     if (fread(magic, 1, 8, f) != 8 || (memcmp(magic, "BBPROBE1", 8) && memcmp(magic, "BBPROBE2", 8) && memcmp(magic,"BBPROBE3",8) && memcmp(magic,"BBPROBE4",8) && memcmp(magic,"BBPROBE5",8))) fail("bad boot file signature");
     uint64_t size = read64(f), entry = read64(f), ns = read64(f), nr = read64(f);
@@ -473,6 +699,16 @@ int main(int argc, char **argv) {
         t[8] = 0x48; t[9] = 0xb8; memcpy(t + 10, &handler, 8);
         t[18] = 0xff; t[19] = 0xe0;
     }
+    const char *trace_env = getenv("BB_TRACE_CALLS");
+    if (trace_env && *trace_env && strcmp(trace_env, "0") && !list_imports) {
+        const char *first = getenv("BB_TRACE_FIRST");
+        if (first && *first) trace_first = (uint32_t)strtoul(first, NULL, 10);
+        trace_counts = calloc(import_count ? import_count : 1, sizeof *trace_counts);
+        trace_stubs = allocate(round_page((import_count + 1) * TRACE_STUB));
+        if (!trace_counts) fail("allocation failed");
+        trace_start_ns = platform_monotonic_ns();
+        printf("Trace: calls to the runtime's PS4 functions are logged (BB_TRACE_CALLS; first %u of each, then powers of two)\n", trace_first);
+    }
     /* SacredFire (--list-imports): how each import was bound: 1 runtime, 2 native module, 3 trap. */
     unsigned char *outcome = calloc(import_count ? import_count : 1, 1);
     if (!outcome) fail("allocation failed");
@@ -482,7 +718,11 @@ int main(int argc, char **argv) {
                         : (uintptr_t)image + relocs[i].value;
         if (relocs[i].kind) {
             uintptr_t resolved = runtime_resolve(names[relocs[i].value], relocs[i].kind == 2);
-            if (resolved) { value = resolved + relocs[i].addend; outcome[relocs[i].value] = 1; }
+            if (resolved) {
+                value = resolved + relocs[i].addend; outcome[relocs[i].value] = 1;
+                if (trace_stubs && relocs[i].kind == 1 && !relocs[i].addend)
+                    value = trace_stub((uint32_t)relocs[i].value, resolved);
+            }
             else if (native_libc && bindings[relocs[i].value]) {
                 uint64_t address=bindings[relocs[i].value];
                 if (binding_kinds[relocs[i].value]!=relocs[i].kind || !mapped(segments,ns,address,relocs[i].addend+1)) fail("native export kind/range mismatch");
@@ -551,7 +791,10 @@ int main(int argc, char **argv) {
                fp.patched, fp.found, fp.functions, fp.unpatched, fp.stub_bytes / 1024, (double)(platform_monotonic_ns() - start) / 1e6);
         free(addresses); free(sizes); free(flags); free(pointers);
     }
+    game_log_install(image, segments, ns);
+    if (game_log_thunk) protect(game_log_thunk, page_size, 5);
     protect(traps, round_page((import_count + 1) * 32), 5);
+    if (trace_stubs) protect(trace_stubs, round_page((import_count + 1) * TRACE_STUB), 5);
     protect(image, round_page(size), 0);
     int executable_entry = 0;
     for (uint64_t i = 0; i < ns; ++i) {
@@ -579,7 +822,8 @@ int main(int argc, char **argv) {
             typedef int (ABI *ModuleInit)(uint64_t,void *,void *);
             int result=((ModuleInit)(image+modules[m].init))(0,NULL,NULL);
             printf("Module %" PRIu64 " initializer returned %d\n",m,result);
-            if (result) fail("module initializer failed");
+            /* module_start: 0 = started and resident; 1 = SCE_KERNEL_START_NO_RESIDENT (EAWebKit). */
+            if (result != 0 && result != 1) fail("module initializer failed");
         }
     }
     printf("Entering original x86-64 code at guest offset 0x%" PRIx64 "\n", entry);

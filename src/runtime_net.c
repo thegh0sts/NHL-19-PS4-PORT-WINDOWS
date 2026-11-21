@@ -348,40 +348,58 @@ static void net_trap(const void *buf, uint64_t size) {
         hit = b[i + 6] == (comp >> 8 & 0xff) && b[i + 7] == (comp & 0xff) && b[i + 8] == (cmd >> 8 & 0xff) &&
               b[i + 9] == (cmd & 0xff) && (b[i + 13] >> 5) == 0 && b[i] == 0 && b[i + 1] == 0;
     if (!hit) return;
-    const uintptr_t lo = 0x800000000ull, hi = 0x800000000ull + 0x50d96dcull;
+    const uintptr_t lo = 0x800000000ull, hi = 0x800000000ull + 0x7000000ull; /* the image and its linked modules */
     const uintptr_t top = platform_thread_stack_top();
     const uintptr_t *sp = (const uintptr_t *)__builtin_frame_address(0);
     char line[2048]; int n = 0, found = 0;
     for (int i = 0; i < 20000 && (uintptr_t)(sp + i + 1) <= top && found < 60 && n < (int)sizeof line - 24; ++i)
         if (sp[i] >= lo && sp[i] < hi) { n += snprintf(line + n, sizeof line - n, " +%#lx", (unsigned long)(sp[i] - lo)); ++found; }
     LOG("trap: Blaze %x:%x sent; game return addresses on the stack:%s", comp, cmd, line);
-#ifndef _WIN32
     /* BB_NET_TRAP_DUMP=file: also save the game image as it is now (initialized reflection tables,
-     * game state), readable regions only, for offline analysis. Once. */
+     * game state), readable regions only (others as zeros), for offline analysis
+     * (tools/ufc3_tdf_schema.py). Once. BB_NET_TRAP_DUMP_SIZE (hex, default 0x7000000): how much
+     * from the image base; enough for the eboot and its linked modules (NHL 19: ~0x65b0000). */
     static int dumped;
     const char *path = getenv("BB_NET_TRAP_DUMP");
     if (path && !dumped) {
         dumped = 1;
-        FILE *out = fopen(path, "wb"), *maps = fopen("/proc/self/maps", "r");
-        const uintptr_t end = lo + 0x2e3a000ull;
-        char row[256];
-        uintptr_t at = lo;
+        const char *sz = getenv("BB_NET_TRAP_DUMP_SIZE");
+        const uintptr_t end = lo + (sz && *sz ? (uintptr_t)strtoull(sz, NULL, 16) : 0x7000000ull);
         static const char zero[4096];
-        while (out && maps && fgets(row, sizeof row, maps)) {
-            unsigned long a0, a1; char perm[5];
-            if (sscanf(row, "%lx-%lx %4s", &a0, &a1, perm) != 3 || a1 <= lo || a0 >= end) continue;
-            if (a0 < lo) a0 = lo;
-            if (a1 > end) a1 = end;
-            for (; at < a0; at += 4096) fwrite(zero, 1, 4096, out);
-            if (perm[0] == 'r') fwrite((const void *)a0, 1, a1 - a0, out);
-            else for (uintptr_t z = a0; z < a1; z += 4096) fwrite(zero, 1, 4096, out);
-            at = a1;
-        }
-        if (maps) fclose(maps);
-        if (out) fclose(out);
-        LOG("trap: game image saved to %s", path);
-    }
+        uint64_t saved = 0;
+        FILE *out = fopen(path, "wb");
+        for (uintptr_t at = lo; out && at < end;) {
+            uintptr_t next = end; int readable = 0;
+#ifdef _WIN32
+            MEMORY_BASIC_INFORMATION mbi;
+            if (VirtualQuery((const void *)at, &mbi, sizeof mbi) == sizeof mbi) {
+                next = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+                const DWORD prot = mbi.Protect & 0xff;
+                readable = mbi.State == MEM_COMMIT && !(mbi.Protect & PAGE_GUARD) && prot != PAGE_NOACCESS &&
+                           prot != PAGE_EXECUTE && prot != 0;
+            } else next = at + 4096;
+#else
+            FILE *maps = fopen("/proc/self/maps", "r");
+            char row[256];
+            next = end;
+            while (maps && fgets(row, sizeof row, maps)) {
+                unsigned long a0, a1; char perm[5];
+                if (sscanf(row, "%lx-%lx %4s", &a0, &a1, perm) != 3) continue;
+                if (a0 <= at && at < a1) { next = a1; readable = perm[0] == 'r'; break; }
+                if (a0 > at && a0 < next) next = a0; /* a gap: unmapped up to the next mapping */
+            }
+            if (maps) fclose(maps);
 #endif
+            if (next > end) next = end;
+            if (next <= at) next = at + 4096;
+            if (readable) { fwrite((const void *)at, 1, next - at, out); saved += next - at; }
+            else for (uintptr_t z = at; z < next; z += 4096) fwrite(zero, 1, next - z < 4096 ? next - z : 4096, out);
+            at = next;
+        }
+        if (out) fclose(out);
+        LOG("trap: game image saved to %s (%llu MiB readable of %llu MiB)", path,
+            (unsigned long long)(saved >> 20), (unsigned long long)((end - lo) >> 20));
+    }
 }
 static ABI int32_t net_send(int id, const void *buf, uint64_t size, int flags) {
     Socket *k = get_socket(id); if (!k) return fail(9);
@@ -698,8 +716,27 @@ static ABI int32_t netctl_nat(uint32_t *info) {
     info[1] = 1; info[2] = 2; info[3] = local_address();
     return 0;
 }
-static ABI int32_t netctl_register(void *cb, void *arg, int32_t *cid) { (void)cb; (void)arg; if (cid) *cid = 1; return 0; }
+/* Callbacks the game registers run from its own polling (sceNetCtlCheckCallback,
+ * sceNpCheckCallback), as on the console. Online, each is told once that the network is up
+ * (NetCtl event 3, IP obtained) and that the user is signed in to PSN (state 2): NHL 19's login
+ * waits for those events after its EA account sign-in before Blaze logs in (the callbacks were
+ * accepted and never called, and the game waited forever after /connect/tokeninfo). */
+typedef void (ABI *NetCtlCallback)(int32_t event, void *arg);
+static NetCtlCallback netctl_cb; static void *netctl_cb_arg; static int netctl_cb_done;
+static ABI int32_t netctl_register(void *cb, void *arg, int32_t *cid) {
+    netctl_cb = (NetCtlCallback)cb; netctl_cb_arg = arg; netctl_cb_done = 0;
+    if (cid) *cid = 1;
+    return 0;
+}
 static ABI int32_t netctl_ok(void) { return 0; }
+static ABI int32_t netctl_check(void) {
+    NetCtlCallback cb = netctl_cb;
+    if (cb && !__atomic_exchange_n(&netctl_cb_done, 1, __ATOMIC_ACQ_REL)) {
+        LOG("netctl: callback told: IP obtained (event 3)");
+        cb(3, netctl_cb_arg);
+    }
+    return 0;
+}
 static ABI int32_t netctl_result(int code, int *result) { (void)code; if (result) *result = 0; return 0; }
 
 /* ---- PSN: signed in, PS Plus, an authorization code the server accepts ---- */
@@ -724,6 +761,32 @@ static int32_t next_request = 0x20000001;
 static ABI int32_t np_state(int32_t user, uint32_t *state) { (void)user; if (state) *state = 2; return 0; }
 static ABI int32_t np_online_id(int32_t user, char *id) { (void)user; if (!id) return (int32_t)0x80550003; online_id(id); return 0; }
 static ABI int32_t np_np_id(int32_t user, char *id) { (void)user; if (!id) return (int32_t)0x80550003; memset(id, 0, 36); online_id(id); return 0; }
+typedef void (ABI *NpStateCallbackA)(int32_t user, int32_t state, void *arg);
+typedef void (ABI *NpStateCallback)(int32_t user, int32_t state, const void *np_id, void *arg);
+static void *np_state_cb; static void *np_state_cb_arg; static int np_state_cb_a, np_state_cb_done;
+static ABI int32_t np_register_state_a(void *cb, void *arg) {
+    np_state_cb_a = 1; np_state_cb_arg = arg; np_state_cb_done = 0; np_state_cb = cb;
+    if (net_log) LOG("PSN: state callback registered");
+    return 1;
+}
+static ABI int32_t np_register_state(void *cb, void *arg) {
+    np_state_cb_a = 0; np_state_cb_arg = arg; np_state_cb_done = 0; np_state_cb = cb;
+    if (net_log) LOG("PSN: state callback registered (old form)");
+    return 1;
+}
+static ABI int32_t np_unregister_state(int32_t id) { (void)id; np_state_cb = NULL; return 0; }
+static ABI int32_t np_check_callback(void) {
+    void *cb = np_state_cb;
+    if (cb && !__atomic_exchange_n(&np_state_cb_done, 1, __ATOMIC_ACQ_REL)) {
+        LOG("PSN: state callback told: user 1 signed in (state 2)");
+        if (np_state_cb_a) ((NpStateCallbackA)cb)(1, 2, np_state_cb_arg);
+        else {
+            char np_id[36]; memset(np_id, 0, sizeof np_id); online_id(np_id);
+            ((NpStateCallback)cb)(1, 2, np_id, np_state_cb_arg);
+        }
+    }
+    return 0;
+}
 static ABI int32_t np_account_id(int32_t user, uint64_t *id) { (void)user; if (id) *id = account_id(); return 0; }
 static ABI int32_t np_country(int32_t user, char *code) { (void)user; if (code) { code[0] = 'u'; code[1] = 's'; code[2] = 0; code[3] = 0; } return 0; }
 static ABI int32_t np_request(const void *param) {
@@ -1221,10 +1284,13 @@ static const RuntimeExport exports[] = {
     {"sceNetResolverGetError", resolver_get_error}, {"sceNetResolverAbort", resolver_abort},
     {"sceNetCtlInit", netctl_init}, {"sceNetCtlTerm", netctl_term}, {"sceNetCtlGetState", netctl_state},
     {"sceNetCtlGetInfo", netctl_info}, {"sceNetCtlGetNatInfo", netctl_nat},
-    {"sceNetCtlRegisterCallback", netctl_register}, {"sceNetCtlCheckCallback", netctl_ok},
+    {"sceNetCtlRegisterCallback", netctl_register}, {"sceNetCtlCheckCallback", netctl_check},
     {"sceNetCtlUnregisterCallback", netctl_ok}, {"sceNetCtlGetResult", netctl_result},
     {"sceNetCtlRegisterCallbackForNpToolkit", netctl_register}, {"sceNetCtlCheckCallbackForNpToolkit", netctl_ok},
     {"sceNetCtlUnregisterCallbackForNpToolkit", netctl_ok},
+    {"sceNpRegisterStateCallbackA", np_register_state_a}, {"sceNpRegisterStateCallback", np_register_state},
+    {"sceNpUnregisterStateCallbackA", np_unregister_state}, {"sceNpUnregisterStateCallback", np_unregister_state},
+    {"sceNpCheckCallback", np_check_callback},
     {"sceNpGetState", np_state}, {"sceNpGetOnlineId", np_online_id}, {"sceNpGetNpId", np_np_id},
     {"sceNpGetAccountIdA", np_account_id}, {"sceNpGetAccountCountryA", np_country},
     {"sceNpCreateAsyncRequest", np_request}, {"sceNpCreateRequest", np_request}, {"sceNpDeleteRequest", np_ok},

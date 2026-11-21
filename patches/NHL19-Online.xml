@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  NHL 19 (CUSA11126 v1.60) online experiments for the native port (our own; see docs/nhl19-online.md).
+  Addresses are eboot vaddr + 0x400000 (shadPS4 format). Off by default: turn one on with
+  BB_PATCHES_CONFIG=tools/nhl19-online-patches.json (or patches.json "enabled").
+-->
+<Patch>
+  <!-- The game's setting "login_with_nucleussdk" (Online / "Nucleus Login", registered at 0x2ff2554,
+       value byte 0x61e50d8, default 1) chooses how the game signs in. With 1 the EA identity library
+       (Nucleus SDK 16.2.3) signs in by itself (AuthForCode, TokenGetByCode, TokenInfoGet) and then
+       nothing more happens. With 0 Blaze's own console login should run instead, as UFC 3's does.
+       The default's store (movb $1 at 0x2ff25e1) becomes movb $0. -->
+  <Metadata Name="Blaze console login (login_with_nucleussdk off)" AppVer="01.60" AppElf="eboot.bin" isEnabled="false">
+    <PatchList>
+      <Line Type="bytes" Address="0x33F25E1" Value="C605F02A1F0300"/>
+    </PatchList>
+  </Metadata>
+</Patch>

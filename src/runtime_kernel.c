@@ -3,6 +3,7 @@
  * use FreeBSD numbering; host errno values never reach the guest directly. */
 #define _GNU_SOURCE
 #include "runtime.h"
+#include <ctype.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -378,8 +379,50 @@ static ABI int32_t condattr_destroy(void **attr) { if (!attr || !*attr) return E
 /* UFC 3: what is left of libkernel. Modules: every PRX the game needs is linked offline, so a
  * dynamic load reports not found (the game falls back). msync: memory is not file-backed. Page
  * table statistics: plenty free. sigreturn is never reached through a signal of ours. */
+static char linked_list[8192]; /* "|name|name|" in lower case, from link.json */
+void runtime_set_linked_modules(const char *boot_path) {
+    char dir[1024]; snprintf(dir,sizeof dir,"%s",boot_path ? boot_path : "");
+    char *slash=strrchr(dir,'/'), *back=strrchr(dir,'\\');
+    if (back && (!slash || back>slash)) slash=back;
+    if (slash) *slash=0; else snprintf(dir,sizeof dir,".");
+    char path[1100]; snprintf(path,sizeof path,"%s/link.json",dir);
+    FILE *f=fopen(path,"rb");
+    if (!f) return;
+    static char text[1<<20];
+    size_t n=fread(text,1,sizeof text-1,f); fclose(f); text[n]=0;
+    size_t used=0; linked_list[used++]='|';
+    for (const char *at=text; (at=strstr(at,"\"file\": \""))!=NULL;) {
+        at+=9;
+        const char *end=strchr(at,'"');
+        if (!end || used+(size_t)(end-at)+2>=sizeof linked_list) break;
+        for (const char *c=at;c<end;++c) linked_list[used++]=(char)tolower((unsigned char)*c);
+        linked_list[used++]='|';
+        at=end;
+    }
+    linked_list[used]=0;
+}
+/* 1-based index of the linked module with this path's file name (letter case ignored), or 0. */
+int runtime_module_linked(const char *path) {
+    if (!path || !linked_list[0]) return 0;
+    const char *name=path;
+    for (const char *c=path;*c;++c) if (*c=='/' || *c=='\\') name=c+1;
+    char key[300]; size_t n=0; key[n++]='|';
+    for (const char *c=name;*c && n<sizeof key-2;++c) key[n++]=(char)tolower((unsigned char)*c);
+    key[n++]='|'; key[n]=0;
+    const char *hit=strstr(linked_list,key);
+    if (!hit) return 0;
+    int index=1;
+    for (const char *c=linked_list;c<hit;++c) if (*c=='|') ++index; /* the separators before it */
+    return index;
+}
 static ABI int32_t load_start_module(const char *path,uint64_t argc,const void *argv,uint32_t flags,const void *opt,int32_t *result) {
     (void)argc; (void)argv; (void)flags; (void)opt; if (result) *result=0;
+    const int linked=runtime_module_linked(path);
+    if (linked) {
+        /* Linked offline and already started before the game's entry (probe.c): its handle. */
+        printf("Runtime: sceKernelLoadStartModule(%s) -> linked module %d (started at boot)\n",path,linked);
+        return 0x10000+linked;
+    }
     printf("Runtime: sceKernelLoadStartModule(%s) -> not found (modules are linked offline)\n",path ? path : "(null)");
     return (int32_t)0x80020002; /* ENOENT */
 }

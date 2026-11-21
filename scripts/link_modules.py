@@ -22,6 +22,21 @@ DEFAULT_MODULES = ('libc.prx', 'libSceFios2.prx')
 FS_LOAD = bytes.fromhex('64488b042500000000')  # mov rax, fs:[0]
 
 
+def find_module(game, filename):
+    """game/sce_module/<name>, or game/<relative path>; letter case ignored per folder (the dump's
+    may differ from what the game asks for)."""
+    path = game / filename if '/' in filename else game / 'sce_module' / filename
+    if path.exists():
+        return path
+    at = game
+    for part in path.relative_to(game).parts:
+        found = next((c for c in at.iterdir() if c.name.lower() == part.lower()), None) if at.is_dir() else None
+        if found is None:
+            raise FileNotFoundError(f'module {filename} not found in {game}')
+        at = found
+    return at
+
+
 def module(path):
     source = path.read_bytes()
     elf, header, ph, _, missing = parse_self(source)
@@ -128,7 +143,11 @@ def link(game, out, module_names=DEFAULT_MODULES):
     fs_patched = patch_fs_loads(image, main['ph'], 0)
     tls_module = 2
     for filename in module_names:
-        m = module(game / 'sce_module' / filename)
+        # A name with a folder (nhl/data/kettle/eawebkit.prx) is a module in the game's own data,
+        # loaded at run time with sceKernelLoadStartModule; others are in sce_module. The table and
+        # link.json keep the file name only (the runtime matches a load by it, case ignored).
+        m = module(find_module(game, filename))
+        filename = Path(filename).name
         loads = [p for p in m['ph'] if p['type'] in (1, 0x61000010)]
         modsize = max(p['vaddr'] + p['memsz'] for p in loads)
         if base + modsize > 512 * 1024 * 1024:
