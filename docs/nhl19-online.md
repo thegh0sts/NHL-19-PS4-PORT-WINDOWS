@@ -88,6 +88,27 @@ Also ruled out in this session (each changed nothing):
 Blaze traffic per run: preAuth (9:7), ping (9:2), fetchClientConfig `NHL_CTS_CONNECTION` (9:1),
 then only pings. No Authentication login is ever sent.
 
+## Breakthrough (2026-11-22): the login works
+
+The game's login state machine (object vtable 0x5824ae8, state at +0x98, switch at 0x2fe4418,
+index = state - 2, table 0x4b3d200) runs: state 5 waits for the EA identity Login (job callback
+0x2fe5a90: success -> 6); **state 6 (0x2fe469d) reads the Blaze config key `blazeServerClientId`**
+and asks EA for an auth code for it (second `/connect/auth`, client_id NHL2019_PS4_SERVER), then
+the Blaze login. Without the key it went to its error state 16 with no message: that was the stop
+after tokeninfo. The chain was found with the BB_GAME_LOG hooks 0x45dadb0 (Login task done),
+0x45c2040 (session result), 0x2feba20 (listener: request id -> job table), 0x2feba3b (job complete).
+
+Now, with tools/nhl19_server.py: Blaze Authentication login (1:0xa) -> authenticated, postAuth,
+UserSessions updateNetworkInfo, fetchClientConfig NHL_DYNAMIC_MSG / NHL_DYNAMIC_ADS / NHL_ROSTER,
+SportsLoginService POST `/nv2/auth` (answered with UFC 3's EASW-* headers: no error), xmshd
+`/xmshd/search` for the roster (answered with no results), then the "Connect with the NHL" screen
+(component 0x86c = ThirdPartyOptIn: cmd 1 getLegalText, 3 status, 2 setStatus; legal text empty).
+
+**Where it stops now:** after Continue/Accept the main menu stays empty. Candidates: the roster
+check (NHL_ROSTER config has none of its keys; the search sends `CRC` ""), NHL_DYNAMIC_MSG/ADS
+(answered with the generic config map), or a Blaze request answered with an empty reply (Stats 7:0xf
+and 7:0x3, Util 9:0x19, ThirdPartyOptIn 0x86c:1/3). Without the server the menu works.
+
 ## Earlier step: the call tracer
 
 `BB_TRACE_CALLS=1` (src/probe.c) logs every PS4 system function the runtime implements, with a

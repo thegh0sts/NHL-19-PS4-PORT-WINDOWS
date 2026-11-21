@@ -44,6 +44,11 @@ base.CLIENT_CONFIG.update({
     # its /connect/auth carries no redirect_uri. The value is the identity library's own callback
     # address (eboot string next to "Nucleus::IdentitySessionImpl::TaskPool").
     'identityRedirectUri': 'https://nucleus/oauth_callback',
+    # The game's login state machine (eboot 0x2fe4418, state 6 at 0x2fe469d), once the EA login is
+    # done, reads this key from the Blaze config and asks EA for an auth code for that client id,
+    # which the Blaze login then carries. Without it the machine goes to its error state (16) with
+    # no message: the login stopped after /connect/tokeninfo.
+    'blazeServerClientId': SERVER_ID,
     # PIN telemetry (eboot 0x25cc37d): host, port (strtol base 10) and environment. Without them the
     # game opens a TCP connection to an empty host name right after Blaze connects. Port 443 reaches
     # this server (40443), which accepts the posts below.
@@ -135,6 +140,13 @@ def nucleus_answer(request: bytes) -> bytes:
         secret = ('code', 'access_token', 'refresh_token', 'client_secret', 'ps4_ticket', 'token', 'nonce')
         shown = [f'{k}={"<hidden>" if k in secret else v[:60]}' for k, v in params]
         print(f'{base.stamp()} nucleus: {path} parameters: {"; ".join(shown)}', flush=True)
+    if path == '/nv2/auth':
+        # SportsLoginService::Login: POST {CTS_AUTH_SERVER}/nv2/auth (UFC 3 used /easo/auth/nv2/auth);
+        # LoginHandler reads the same EASW-* response headers as UFC 3's.
+        from email.parser import BytesHeaderParser
+        headers = BytesHeaderParser().parsebytes(head.partition(b'\r\n')[2] + b'\r\n\r\n')
+        print(f'{base.stamp()} easo: sports login for {headers.get("X-UFC3-Online-Id", "Player")}', flush=True)
+        return base.easo_login_answer(headers)
     if path in ('/pinEvents', '/bugsentry/session/', '/bugsentry/session'):
         # Telemetry and crash-session posts: accepted and dropped.
         return base.json_answer('200 OK', {'status': 'ok'})

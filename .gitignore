@@ -47,3 +47,6 @@ gpu/shim/bbport_gnm_table.inc
 user-online/
 user-test/
 user.broken/
+user-online/
+user-test/
+user.broken/

@@ -219,7 +219,7 @@ static ABI void game_log(const char *fmt, const GuestVaList *va) {
     printf("Game log: %s\n", out);
     fflush(stdout);
 }
-/* Three entries are hooked (the third below). 0x45c1750 (string, format, va_list) formats the identity library's
+/* Seven entries are hooked (the last five below). 0x45c1750 (string, format, va_list) formats the identity library's
  * messages. 0x45fbb30 (logger, level, format, ...) is the sports login service's logger: its
  * thunk keeps the argument registers in a System V register save area and points a va_list at
  * it and at the caller's stack arguments. Each entry's first instructions move into the thunk. */
@@ -236,15 +236,122 @@ static ABI void game_login_result(void *session, const unsigned char *result, co
     printf("Game log: identity Login result: error %d (0x%x), task %u: %.400s\n", code, (unsigned)code, id, message);
     fflush(stdout);
 }
-/* kind 0: (string, format, va_list); 1: (logger, level, format, ...); 2: handler(rdi, rsi, rdx). */
-typedef struct { uint64_t text; unsigned char moved[24]; unsigned length; int kind; } GameLogHook;
+/* 0x45dadb0 is the Login task's "done" (vtable+0x18, after SetDone): it calls the EASTL function
+ * at task+0x88 (invoker; rdi = task+0x88, rsi = task) or else the one at task+0x98 (rdi = task,
+ * rsi = result at task+0xa8). Its hook prints what the task holds: which code gets the result. */
+static void game_log_address(char *out, size_t size, uint64_t value) {
+    const uint64_t base = (uint64_t)(uintptr_t)image;
+    if (value >= base && value - base < 0x10000000) snprintf(out, size, "eboot 0x%llx", (unsigned long long)(value - base));
+    else snprintf(out, size, "0x%llx", (unsigned long long)value);
+}
+static ABI void game_task_done(const unsigned char *task, const void *unused1, const void *unused2) {
+    (void)unused1; (void)unused2;
+    if (!task || (uintptr_t)task < 0x10000) return;
+    uint32_t id; const char *name; uint64_t f[4], vtable;
+    memcpy(&vtable, task, 8); memcpy(&id, task + 8, 4); memcpy(&name, task + 0x10, 8); memcpy(f, task + 0x88, sizeof f);
+    if (!name || (uintptr_t)name < 0x10000) name = "?";
+    char v[48], a[48], b[48], c[48], d[48];
+    game_log_address(v, sizeof v, vtable); game_log_address(a, sizeof a, f[0]); game_log_address(b, sizeof b, f[1]);
+    game_log_address(c, sizeof c, f[2]); game_log_address(d, sizeof d, f[3]);
+    printf("Game log: task %.40s:%04u done (vtable %s): +0x88 %s, +0x90 %s, +0x98 %s, +0xa0 %s\n", name, id, v, a, b, c, d);
+    fflush(stdout);
+}
+/* 0x45c2040 (session, task, result) is the method the Login task's callback runs: a non-zero task
+ * code (+0x1c, message +0x20) goes to the game's listener (session+0x158) method +0x48; success
+ * stores the tokens and calls the listener's +0x10 and +0x38. Its hook prints which, and where. */
+static ABI void game_login_done(const unsigned char *session, const void *task_pointer, const void *result) {
+    (void)result;
+    const unsigned char *task = task_pointer;
+    if (!session || !task || (uintptr_t)session < 0x10000 || (uintptr_t)task < 0x10000) return;
+    int32_t code; const char *message; uint64_t listener = 0, vt = 0, m[3] = {0};
+    memcpy(&code, task + 0x1c, 4); memcpy(&message, task + 0x20, 8); memcpy(&listener, session + 0x158, 8);
+    if (listener >= 0x10000) {
+        memcpy(&vt, (const void *)(uintptr_t)listener, 8);
+        if (vt >= 0x10000) { memcpy(&m[0], (const void *)(uintptr_t)(vt + 0x10), 8); memcpy(&m[1], (const void *)(uintptr_t)(vt + 0x38), 8); memcpy(&m[2], (const void *)(uintptr_t)(vt + 0x48), 8); }
+    }
+    char a[48], b[48], c[48], d[48];
+    game_log_address(a, sizeof a, vt); game_log_address(b, sizeof b, m[0]); game_log_address(c, sizeof c, m[1]); game_log_address(d, sizeof d, m[2]);
+    if (code) {
+        if (!message || (uintptr_t)message < 0x10000) message = "(no message)";
+        printf("Game log: identity Login done: error %d (0x%x): %.300s\n", code, (unsigned)code, message);
+    } else puts("Game log: identity Login done: success");
+    printf("Game log:   listener vtable %s: +0x10 %s, +0x38 %s, +0x48 %s\n", a, b, c, d);
+    fflush(stdout);
+}
+/* 0x2feba20 is the game's listener method the identity session calls on success (vtable 0x5824f80
+ * +0x10; rdi = listener, esi = request id). It looks the id up in a sorted table at
+ * listener-0x10+0x48..+0x50 (8-byte entries: int request id, int job id, 0x2febd40) and completes
+ * that job; with no entry nothing happens. Its hook prints the id and the table. */
+static ABI void game_listener_done(const unsigned char *listener, const void *id_value, const void *name) {
+    if (!listener || (uintptr_t)listener < 0x10000) return;
+    const uint32_t id = (uint32_t)(uintptr_t)id_value;
+    const unsigned char *object = listener - 0x10;
+    uint64_t begin, end;
+    memcpy(&begin, object + 0x48, 8); memcpy(&end, object + 0x50, 8);
+    char text[64] = "";
+    if (name && (uintptr_t)name >= 0x10000) snprintf(text, sizeof text, " (%.40s)", (const char *)name);
+    printf("Game log: listener: request %u%s finished; pending table has %lld entries:", id, text,
+           end >= begin && begin >= 0x10000 ? (long long)((end - begin) / 8) : -1LL);
+    if (end >= begin && begin >= 0x10000)
+        for (uint64_t p = begin; p < end && p < begin + 16 * 8; p += 8) {
+            int32_t key, job;
+            memcpy(&key, (const void *)(uintptr_t)p, 4); memcpy(&job, (const void *)(uintptr_t)(p + 4), 4);
+            printf(" [request %d -> job %d]", key, job);
+        }
+    putchar('\n');
+    fflush(stdout);
+}
+/* 0x2feba3b, inside that listener method once the job is found (rbx = the job): next it calls
+ * job->vtable+0x30(job, 0, 0) (complete) and job->vtable+0 (release). Its hook prints the job's
+ * class and those methods, so the code that should go on after the login can be read. */
+static ABI void game_job_complete(const unsigned char *job, const void *unused1, const void *unused2) {
+    (void)unused1; (void)unused2;
+    if (!job || (uintptr_t)job < 0x10000) return;
+    uint64_t vt = 0, m[8] = {0}, fields[6] = {0};
+    memcpy(&vt, job, 8); memcpy(fields, job + 8, sizeof fields);
+    if (vt >= 0x10000) memcpy(m, (const void *)(uintptr_t)vt, sizeof m);
+    char a[48], b[48], c[48], d[48], e[48];
+    game_log_address(a, sizeof a, vt); game_log_address(b, sizeof b, m[0]); game_log_address(c, sizeof c, m[6]);
+    game_log_address(d, sizeof d, m[2]); game_log_address(e, sizeof e, m[4]);
+    printf("Game log: job completed: vtable %s: +0x0 %s, +0x30 %s (complete), +0x10 %s, +0x20 %s\n", a, b, c, d, e);
+    printf("Game log:   job fields +0x08..+0x30: %llx %llx %llx %llx %llx %llx\n",
+           (unsigned long long)fields[0], (unsigned long long)fields[1], (unsigned long long)fields[2],
+           (unsigned long long)fields[3], (unsigned long long)fields[4], (unsigned long long)fields[5]);
+    /* complete (0x2fed120): an EASTL function at job+0x40 (invoker; +0x48.. its storage) or else a
+     * plain function at +0x50, called with (result, job id at +0x30) */
+    uint64_t cb[6];
+    memcpy(cb, job + 0x40, sizeof cb);
+    char f0[48], f1[48], f2[48], f3[48];
+    game_log_address(f0, sizeof f0, cb[0]); game_log_address(f1, sizeof f1, cb[1]);
+    game_log_address(f2, sizeof f2, cb[2]); game_log_address(f3, sizeof f3, cb[3]);
+    printf("Game log:   job callback +0x40 %s, +0x48 %s, +0x50 %s, +0x58 %s\n", f0, f1, f2, f3);
+    if (cb[1] >= 0x10000 && !(cb[1] & 7)) { /* the storage's object, if any: its class */
+        uint64_t ovt = 0; char o[48];
+        memcpy(&ovt, (const void *)(uintptr_t)cb[1], 8);
+        game_log_address(o, sizeof o, ovt);
+        printf("Game log:   callback object 0x%llx, its vtable %s\n", (unsigned long long)cb[1], o);
+    }
+    fflush(stdout);
+}
+/* kind 0: (string, format, va_list); 1: (logger, level, format, ...); 2: handler(rdi, rsi, rdx);
+ * 3: handler(rbx). */
+typedef struct { uint64_t text; unsigned char moved[24]; unsigned length; int kind; ABI void (*handler)(const unsigned char *, const void *, const void *); } GameLogHook;
 static const GameLogHook game_log_hooks[] = {
     {0x45c1750, {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, /* push rbp; mov rbp,rsp; push r15..r12, rbx */
-                 0x48, 0x81, 0xec, 0x88, 0x00, 0x00, 0x00}, 20, 0},                               /* sub rsp,0x88 */
+                 0x48, 0x81, 0xec, 0x88, 0x00, 0x00, 0x00}, 20, 0, NULL},                               /* sub rsp,0x88 */
     {0x45fbb30, {0x55, 0x48, 0x89, 0xe5, 0x53, 0x48, 0x81, 0xec, 0xd8, 0x00, 0x00, 0x00,           /* push rbp; mov rbp,rsp; push rbx; sub rsp,0xd8 */
-                 0x84, 0xc0}, 14, 1},                                                               /* test al,al (flags kept for its je) */
+                 0x84, 0xc0}, 14, 1, NULL},                                                               /* test al,al (flags kept for its je) */
     {0x45c0f60, {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, /* push rbp; mov rbp,rsp; push r15..r12, rbx */
-                 0x48, 0x83, 0xec, 0x68}, 17, 2},                                                   /* sub rsp,0x68 */
+                 0x48, 0x83, 0xec, 0x68}, 17, 2, (ABI void (*)(const unsigned char *, const void *, const void *))game_login_result},
+    {0x45dadb0, {0x48, 0x89, 0xf8, 0x48, 0x8b, 0x88, 0x88, 0x00, 0x00, 0x00,                       /* mov rax,rdi; mov rcx,[rax+0x88] */
+                 0x48, 0x8d, 0x90, 0xa8, 0x00, 0x00, 0x00}, 17, 2, game_task_done},                  /* lea rdx,[rax+0xa8] */
+    {0x45c2040, {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x50}, /* push rbp; mov rbp,rsp; push r15..r12, rbx, rax */
+                 14, 2, game_login_done},
+    {0x2feba20, {0x55, 0x48, 0x89, 0xe5, 0x53, 0x50, 0xc6, 0x47, 0x30, 0x01,                       /* push rbp; mov rbp,rsp; push rbx, rax; mov byte [rdi+0x30],1 */
+                 0x48, 0x83, 0xc7, 0xf0}, 14, 2,                                                      /* add rdi,-0x10 */
+     (ABI void (*)(const unsigned char *, const void *, const void *))game_listener_done},
+    {0x2feba3b, {0xc6, 0x43, 0x38, 0x01, 0x31, 0xf6, 0x31, 0xd2,                                   /* mov byte [rbx+0x38],1; xor esi,esi; xor edx,edx */
+                 0x48, 0x89, 0xdf, 0x48, 0x8b, 0x03}, 14, 3, game_job_complete},                     /* mov rdi,rbx; mov rax,[rbx] */
 };
 enum { GAME_LOG_THUNK = 512 }; /* about 320 bytes used */
 static unsigned char *game_log_thunk;
@@ -267,7 +374,9 @@ static void game_log_install(unsigned char *base, Segment *segments, uint64_t ns
                 0x57, 0x56, 0x52, 0x51, 0x41, 0x50, 0x41, 0x51, 0x50, /* push rdi rsi rdx rcx r8 r9 rax: rsp 16-aligned */
                 0x48, 0x89, 0xf7,                                     /* mov rdi,rsi (format) */
                 0x48, 0x89, 0xd6};                                    /* mov rsi,rdx (va_list) */
-            p = game_log_emit(p, head, k->kind == 2 ? 9 : sizeof head); /* kind 2 keeps rdi, rsi, rdx */
+            p = game_log_emit(p, head, k->kind >= 2 ? 9 : sizeof head); /* kind 2 keeps rdi, rsi, rdx */
+            /* kind 3 is entered mid-function with rsp 16-aligned (not 8 as at an entry): 8 more */
+            if (k->kind == 3) { static const unsigned char rbx[] = {0x48, 0x89, 0xdf, 0x48, 0x83, 0xec, 0x08}; p = game_log_emit(p, rbx, sizeof rbx); } /* mov rdi,rbx; sub rsp,8 */
         } else {
             /* sub rsp,0xd8 (16-aligned); [0..47] rdi..r9, [48..175] xmm0-7, [176..199] va_list, [200] rax */
             static const unsigned char head[] = {
@@ -290,9 +399,10 @@ static void game_log_install(unsigned char *base, Segment *segments, uint64_t ns
                 0x48, 0x8d, 0xb4, 0x24, 0xb0, 0x00, 0x00, 0x00};                  /* lea rsi,[rsp+176] (va_list) */
             p = game_log_emit(p, va, sizeof va);
         }
-        const uintptr_t logger = k->kind == 2 ? (uintptr_t)game_login_result : (uintptr_t)game_log;
+        const uintptr_t logger = k->kind >= 2 ? (uintptr_t)k->handler : (uintptr_t)game_log;
         *p++ = 0x48; *p++ = 0xb8; memcpy(p, &logger, 8); p += 8; /* movabs rax, handler */
         *p++ = 0xff; *p++ = 0xd0;                                /* call rax */
+        if (k->kind == 3) { static const unsigned char add8[] = {0x48, 0x83, 0xc4, 0x08}; p = game_log_emit(p, add8, sizeof add8); } /* add rsp,8 */
         if (k->kind != 1) {
             static const unsigned char tail[] = {0x58, 0x41, 0x59, 0x41, 0x58, 0x59, 0x5a, 0x5e, 0x5f}; /* pop in reverse */
             p = game_log_emit(p, tail, sizeof tail);
