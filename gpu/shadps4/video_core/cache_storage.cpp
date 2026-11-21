@@ -113,8 +113,14 @@ void DataBase::Open() {
         }
     } else {
         cache_path = GetUserPath(PathType::CacheDir) / game_info.GameSerial();
-        if (!std::filesystem::exists(cache_path)) {
-            std::filesystem::create_directories(cache_path);
+        // bbport: always asked for, not only when exists() says it's missing. Right after the
+        // launcher's "Clear shader cache" (rd /s /q), Windows can still report the folder while
+        // its deletion is pending, and then it vanishes. Writes also recreate it (WriteVector).
+        std::error_code ec;
+        std::filesystem::create_directories(cache_path, ec);
+        if (ec) {
+            LOG_ERROR(Render, "Can't create the shader cache folder {}: {}", cache_path.string(),
+                      ec.message());
         }
     }
 
@@ -159,12 +165,23 @@ bool WriteVector(const BlobType type, std::filesystem::path&& path_, std::vector
                 using namespace Common::FS;
                 auto temp = path;
                 temp += ".tmp";
-                bool written = false;
-                {
+                const auto write_temp = [&] {
                     const auto file = IOFile{temp, FileAccessMode::Create};
-                    written = file.IsOpen() && file.Write(v) == v.size();
-                }
+                    return file.IsOpen() && file.Write(v) == v.size();
+                };
                 std::error_code ec;
+                bool written = write_temp();
+                // bbport: the folder may have gone since start-up (the launcher's "Clear shader
+                // cache" removed it just before the game started): make it again and retry once.
+                if (!written && !std::filesystem::exists(path.parent_path(), ec)) {
+                    std::filesystem::create_directories(path.parent_path(), ec);
+                    if (!ec) {
+                        LOG_WARNING(Render, "Shader cache folder was missing: made it again ({})",
+                                    path.parent_path().string());
+                        written = write_temp();
+                    }
+                }
+                ec.clear();
                 if (written) {
                     std::filesystem::rename(temp, path, ec);
                 }
