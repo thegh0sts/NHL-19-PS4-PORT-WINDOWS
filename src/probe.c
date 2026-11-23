@@ -219,7 +219,7 @@ static ABI void game_log(const char *fmt, const GuestVaList *va) {
     printf("Game log: %s\n", out);
     fflush(stdout);
 }
-/* Seven entries are hooked (the last five below). 0x45c1750 (string, format, va_list) formats the identity library's
+/* Nine entries are hooked (the last seven below). 0x45c1750 (string, format, va_list) formats the identity library's
  * messages. 0x45fbb30 (logger, level, format, ...) is the sports login service's logger: its
  * thunk keeps the argument registers in a System V register save area and points a va_list at
  * it and at the caller's stack arguments. Each entry's first instructions move into the thunk. */
@@ -319,7 +319,7 @@ static ABI void game_job_complete(const unsigned char *job, const void *unused1,
            (unsigned long long)fields[3], (unsigned long long)fields[4], (unsigned long long)fields[5]);
     /* complete (0x2fed120): an EASTL function at job+0x40 (invoker; +0x48.. its storage) or else a
      * plain function at +0x50, called with (result, job id at +0x30) */
-    uint64_t cb[6];
+    uint64_t cb[4]; /* the job is 0x68 bytes: +0x40..+0x60 */
     memcpy(cb, job + 0x40, sizeof cb);
     char f0[48], f1[48], f2[48], f3[48];
     game_log_address(f0, sizeof f0, cb[0]); game_log_address(f1, sizeof f1, cb[1]);
@@ -333,8 +333,44 @@ static ABI void game_job_complete(const unsigned char *job, const void *unused1,
     }
     fflush(stdout);
 }
+/* 0x396ae22, in the game's Lua error reporter (0x396aa10; "LUA runtime error" and the rest):
+ * r14 = lua_State, r15d = the error code (2 runtime, 4 memory, 5 error handler). The message is
+ * the value on top of the Lua stack (L+0x10 = top; a TValue is 16 bytes with its type at +8; type
+ * 4 is a string whose length is at +0x10 and its bytes at +0x18, as lua_tolstring 0x3b68500). */
+static ABI void game_lua_error(const unsigned char *lua, const void *code_value, const void *unused) {
+    (void)unused;
+    if (!lua || (uintptr_t)lua < 0x10000) return;
+    uint64_t top = 0, value = 0, length = 0;
+    int32_t type = 0;
+    memcpy(&top, lua + 0x10, 8);
+    const char *message = "(not a string)";
+    if (top >= 0x10010) {
+        memcpy(&value, (const void *)(uintptr_t)(top - 0x10), 8);
+        memcpy(&type, (const void *)(uintptr_t)(top - 0x10 + 8), 4);
+        if (type == 4 && value >= 0x10000) {
+            memcpy(&length, (const void *)(uintptr_t)(value + 0x10), 8);
+            message = (const char *)(uintptr_t)(value + 0x18);
+        }
+    }
+    printf("Game log: LUA error (code %d): %.*s\n", (int)(uintptr_t)code_value,
+           (int)(length && length < 2000 ? length : (type == 4 ? 2000 : 14)), message);
+    fflush(stdout);
+}
+/* 0x2fe41a0 is the game's online login state machine update (object vtable 0x5824ae8, state at
+ * +0x98, error code at +0x9c; switch at 0x2fe4418 on state - 2). Its hook prints each change. */
+static ABI void game_login_state(const unsigned char *object, const void *unused1, const void *unused2) {
+    (void)unused1; (void)unused2;
+    static int32_t last = -1;
+    if (!object || (uintptr_t)object < 0x10000) return;
+    int32_t state, error;
+    memcpy(&state, object + 0x98, 4); memcpy(&error, object + 0x9c, 4);
+    if (state == last) return;
+    printf("Game log: online login state %d -> %d (error code 0x%x)\n", last, state, (unsigned)error);
+    fflush(stdout);
+    last = state;
+}
 /* kind 0: (string, format, va_list); 1: (logger, level, format, ...); 2: handler(rdi, rsi, rdx);
- * 3: handler(rbx). */
+ * 3: handler(rbx); 4: handler(r14, r15). 3 and 4 are entered mid-function. */
 typedef struct { uint64_t text; unsigned char moved[24]; unsigned length; int kind; ABI void (*handler)(const unsigned char *, const void *, const void *); } GameLogHook;
 static const GameLogHook game_log_hooks[] = {
     {0x45c1750, {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, /* push rbp; mov rbp,rsp; push r15..r12, rbx */
@@ -352,8 +388,13 @@ static const GameLogHook game_log_hooks[] = {
      (ABI void (*)(const unsigned char *, const void *, const void *))game_listener_done},
     {0x2feba3b, {0xc6, 0x43, 0x38, 0x01, 0x31, 0xf6, 0x31, 0xd2,                                   /* mov byte [rbx+0x38],1; xor esi,esi; xor edx,edx */
                  0x48, 0x89, 0xdf, 0x48, 0x8b, 0x03}, 14, 3, game_job_complete},                     /* mov rdi,rbx; mov rax,[rbx] */
+    {0x396ae22, {0xbe, 0xff, 0xff, 0xff, 0xff, 0x31, 0xd2, 0x4c, 0x89, 0xf7,                       /* mov esi,-1; xor edx,edx; mov rdi,r14 */
+                 0xbb, 0xff, 0xff, 0xff, 0xff}, 15, 4,                                                /* mov ebx,-1 */
+     (ABI void (*)(const unsigned char *, const void *, const void *))game_lua_error},
+    {0x2fe41a0, {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53,    /* push rbp; mov rbp,rsp; push r15..r12, rbx */
+                 0x48, 0x81, 0xec, 0xc8, 0x00, 0x00, 0x00}, 20, 2, game_login_state},                /* sub rsp,0xc8 */
 };
-enum { GAME_LOG_THUNK = 512 }; /* about 320 bytes used */
+enum { GAME_LOG_THUNK = 400 }; /* about 320 bytes used */
 static unsigned char *game_log_thunk;
 static unsigned char *game_log_emit(unsigned char *p, const void *bytes, size_t n) { memcpy(p, bytes, n); return p + n; }
 static void game_log_install(unsigned char *base, Segment *segments, uint64_t ns) {
@@ -377,6 +418,7 @@ static void game_log_install(unsigned char *base, Segment *segments, uint64_t ns
             p = game_log_emit(p, head, k->kind >= 2 ? 9 : sizeof head); /* kind 2 keeps rdi, rsi, rdx */
             /* kind 3 is entered mid-function with rsp 16-aligned (not 8 as at an entry): 8 more */
             if (k->kind == 3) { static const unsigned char rbx[] = {0x48, 0x89, 0xdf, 0x48, 0x83, 0xec, 0x08}; p = game_log_emit(p, rbx, sizeof rbx); } /* mov rdi,rbx; sub rsp,8 */
+            if (k->kind == 4) { static const unsigned char r[] = {0x4c, 0x89, 0xf7, 0x4c, 0x89, 0xfe, 0x48, 0x83, 0xec, 0x08}; p = game_log_emit(p, r, sizeof r); } /* mov rdi,r14; mov rsi,r15; sub rsp,8 */
         } else {
             /* sub rsp,0xd8 (16-aligned); [0..47] rdi..r9, [48..175] xmm0-7, [176..199] va_list, [200] rax */
             static const unsigned char head[] = {
@@ -402,7 +444,7 @@ static void game_log_install(unsigned char *base, Segment *segments, uint64_t ns
         const uintptr_t logger = k->kind >= 2 ? (uintptr_t)k->handler : (uintptr_t)game_log;
         *p++ = 0x48; *p++ = 0xb8; memcpy(p, &logger, 8); p += 8; /* movabs rax, handler */
         *p++ = 0xff; *p++ = 0xd0;                                /* call rax */
-        if (k->kind == 3) { static const unsigned char add8[] = {0x48, 0x83, 0xc4, 0x08}; p = game_log_emit(p, add8, sizeof add8); } /* add rsp,8 */
+        if (k->kind >= 3) { static const unsigned char add8[] = {0x48, 0x83, 0xc4, 0x08}; p = game_log_emit(p, add8, sizeof add8); } /* add rsp,8 */
         if (k->kind != 1) {
             static const unsigned char tail[] = {0x58, 0x41, 0x59, 0x41, 0x58, 0x59, 0x5a, 0x5e, 0x5f}; /* pop in reverse */
             p = game_log_emit(p, tail, sizeof tail);

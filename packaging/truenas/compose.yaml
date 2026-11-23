@@ -1,0 +1,32 @@
+# NHL 19 online server (tools/nhl19_server.py) as a TrueNAS Custom App.
+# TrueNAS 25.10: Apps > Discover Apps > Custom App > Install via YAML, paste this file, set
+# SERVER_DIR below to the dataset that holds the server files (see packaging/truenas/README.md).
+#
+# It is the lobby only: sign-in, menus, matchmaking, stats. The match itself goes directly between
+# the two players' PCs (UDP), so their PCs must still reach each other.
+services:
+  nhl19-server:
+    image: python:3-slim
+    container_name: nhl19-server
+    restart: unless-stopped
+    # Host networking: players connect to the NAS's own address, and the UDP QoS ping (17502)
+    # answers from it. Ports used: TCP 42230 10041 40443 40080 10744 10745, UDP 17502.
+    network_mode: host
+    # The TrueNAS "apps" user; the dataset needs read access for it (the Apps ACL preset).
+    user: "568:568"
+    working_dir: /server
+    command: ["python3", "-u", "nhl19_server.py", "--bind", "0.0.0.0"]
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      TZ: "Australia/Sydney"
+      # Home screen featured tiles (tile ids, comma separated).
+      NHL19_TILES: "1,2,3,4"
+    volumes:
+      # SERVER_DIR: change /mnt/tank/apps/nhl19-server to your dataset's path.
+      - /mnt/tank/apps/nhl19-server:/server:ro
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('127.0.0.1', 10041), 3).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

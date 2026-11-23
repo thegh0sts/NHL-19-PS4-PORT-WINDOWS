@@ -3,7 +3,7 @@
  * toolchain with no dependency beyond Windows). GPL-2.0-or-later.
  *
  * Window: the game folder (picker; the game check decides), the game language, online play
- * (Offline, Join server: the host's address, Host server: this PC runs tools\ufc3_server.py for
+ * (Offline, Join server: the host's address, Host server: this PC runs tools\nhl19_server.py for
  * the session, see "Host server" below), the controller for port 1, the game patches (written to bbport.ini as the in-game menu does), PS4 Pro mode, fullscreen,
  * the developer switches (frame statistics, Vulkan validation, clear the shader cache, menu
  * trace), the log folder (empty: logs beside the launcher; BB_LOG_DIR wins over the window), Play/Stop, the
@@ -428,15 +428,16 @@ static DWORD script(const wchar_t *folder, const wchar_t *name, const wchar_t *c
     return run(line, captured, capture_size, 0, INFINITE);
 }
 
-/* ---- Host server: tools\ufc3_server.py with the bundled Python, for one game session ----
+/* ---- Host server: tools\nhl19_server.py with the bundled Python, for one game session ----
  * Play in Host mode, after the preparation: the ports must be free (one in use is reported, never
- * taken over or closed: another UFC3.exe hosting, a ufc3_server.py); the server starts with
+ * taken over or closed: another launcher hosting, a running nhl19_server.py); the server starts with
  * --bind 0.0.0.0, its output in <data>\logs\server-<time>.log; every listener has to answer on the
  * chosen address before the game starts, with BB_ONLINE_SERVER = that address, not loopback (the
  * runtime announces to the peer the interface that routes to the server: runtime_net.c
  * local_address). The server ends with the game (its exit, Stop, the window closed, a failed
  * start); it is in a job object that Windows kills with the launcher if the launcher is killed. */
-static unsigned short host_tcp_ports[] = {42230, 40443, 40080, 10041, 10744, 17502}; /* ufc3_server.py --ports default */
+static unsigned short host_tcp_ports[] = {42230, 40443, 40080, 10041, 10744, 17502}; /* nhl19_server.py --ports default */
+static unsigned short host_coordinator_port = 10745;                               /* nhl19_server.py QoS coordinator */
 static unsigned short host_udp_port = 17502;                                       /* ufc3_server.py QOS_PORT */
 static DWORD host_start_timeout_ms = 30000; /* a first start can be slow (an antivirus scanning python\) */
 static HANDLE server_job, server_process;    /* the play thread owns them; Stop and closing only kill */
@@ -652,17 +653,18 @@ static int server_failed(void) {
 static int server_start(uint32_t ip) {
     wchar_t address[16], script_path[PATHW], message[1024];
     ip_text(ip, address, 16);
-    join(script_path, PATHW, root, L"tools\\ufc3_server.py");
-    if (!exists(script_path)) { fail(L"tools\\ufc3_server.py is missing next to the launcher: the package is incomplete."); return 1; }
+    join(script_path, PATHW, root, L"tools\\nhl19_server.py");
+    if (!exists(script_path)) { fail(L"tools\\nhl19_server.py is missing next to the launcher: the package is incomplete."); return 1; }
     if (!net_available) { fail(L"Host server: Windows networking (ws2_32.dll) is not available."); return 1; }
     /* Ports already held: not ours to take over or close. */
     wchar_t taken[256] = L""; size_t at = 0;
     for (int i = 0; i < COUNT(host_tcp_ports); ++i)
         if (port_taken(SOCK_STREAM, host_tcp_ports[i])) at += (size_t)_snwprintf(taken + at, 256 - at, L"%ls%u/TCP", at ? L", " : L"", host_tcp_ports[i]);
+    if (port_taken(SOCK_STREAM, host_coordinator_port)) at += (size_t)_snwprintf(taken + at, 256 - at, L"%ls%u/TCP", at ? L", " : L"", host_coordinator_port);
     if (port_taken(SOCK_DGRAM, host_udp_port)) at += (size_t)_snwprintf(taken + at, 256 - at, L"%ls%u/UDP", at ? L", " : L"", host_udp_port);
     if (at) {
-        _snwprintf(message, 1024, L"Host server: port %ls already in use on this PC, so the server cannot start. Another UFC 3 server "
-                                  L"is probably running (another UFC3.exe hosting, or ufc3_server.py): close it, or pick Join server "
+        _snwprintf(message, 1024, L"Host server: port %ls already in use on this PC, so the server cannot start. Another NHL 19 server "
+                                  L"is probably running (another launcher hosting, or nhl19_server.py in a terminal): close it, or pick Join server "
                                   L"and type its address. (A port reserved by Windows shows in: netsh int ipv4 show excludedportrange tcp)", taken);
         message[1023] = 0; fail(message); return 1;
     }
@@ -674,7 +676,7 @@ static int server_start(uint32_t ip) {
     SECURITY_ATTRIBUTES inheritable = {.nLength = sizeof(inheritable), .bInheritHandle = TRUE};
     HANDLE log = CreateFileW(server_log, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &inheritable, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (log == INVALID_HANDLE_VALUE) { _snwprintf(message, 1024, L"Host server: cannot write %ls", server_log); message[1023] = 0; fail(message); return 1; }
-    /* python -E -s -u -X utf8 tools\ufc3_server.py --bind 0.0.0.0 --ports ...: one argument each, no shell. */
+    /* python -E -s -u -X utf8 tools\nhl19_server.py --bind 0.0.0.0 --ports ...: one argument each, no shell. */
     static wchar_t line[32768]; wchar_t ports[128] = L"";
     for (int i = 0, k = 0; i < COUNT(host_tcp_ports); ++i) k += _snwprintf(ports + k, 128 - k, L"%ls%u", i ? L"," : L"", host_tcp_ports[i]);
     line[0] = 0;
@@ -687,7 +689,7 @@ static int server_start(uint32_t ip) {
     {
         char header[PATHW * 3 + 64]; char utf8[PATHW * 3];
         WideCharToMultiByte(CP_UTF8, 0, line, -1, utf8, sizeof(utf8), NULL, NULL);
-        DWORD written; const int n = snprintf(header, sizeof(header), "UFC3.exe host server for %ls: %s\r\n", address, utf8);
+        DWORD written; const int n = snprintf(header, sizeof(header), "NHL 19 launcher host server for %ls: %s\r\n", address, utf8);
         if (n > 0) WriteFile(log, header, (DWORD)strlen(header), &written, NULL);
     }
     logw(L"Host server: starting (log: %ls)\n> %ls\n", server_log, line);
@@ -921,10 +923,9 @@ static DWORD play_impl(const wchar_t *const *extra, int extra_count) {
     game_env(L"BB_GAMEPAD", settings.gamepad[0] ? settings.gamepad : NULL);
     game_env(L"BB_USER_NAME", settings.player[0] ? settings.player : NULL); /* the PS4 user name the game shows */
     game_env(L"BB_LANGUAGE", language_ids[settings.language]); /* a BB_LANGUAGE set before the launcher (a .bat) wins */
-    /* NHL 19: no online play (UFC 3's Join/Host is for its own server); the network mode without a
-     * server, BB_ONLINE_SERVER=127.0.0.1, gets the game past its offline start-up crash (a null
-     * online-service global read by the sim thread). */
-    settings.online_mode = ONLINE_OFFLINE;
+    /* NHL 19: Offline still runs the network mode, with no server (BB_ONLINE_SERVER=127.0.0.1): that
+     * gets the game past its offline start-up crash (a null online-service global read by the sim
+     * thread). Join: the host's server; Host: tools\nhl19_server.py on this PC, at its address. */
     const wchar_t *online = settings.online_mode == ONLINE_HOST ? settings.host_address :
                             settings.online_mode == ONLINE_JOIN ? settings.join_address : NULL;
     if (settings.online_mode == ONLINE_JOIN && !settings.join_address[0] && !given_env(L"BB_ONLINE_SERVER")) {
@@ -933,8 +934,7 @@ static DWORD play_impl(const wchar_t *const *extra, int extra_count) {
     if (settings.online_mode == ONLINE_HOST && given_env(L"BB_ONLINE_SERVER") && wcscmp(given_env(L"BB_ONLINE_SERVER"), settings.host_address)) {
         fail(L"BB_ONLINE_SERVER differs from the selected Host address. Remove the environment override or select that same local IP."); return 2;
     }
-    (void)online;
-    game_env(L"BB_ONLINE_SERVER", L"127.0.0.1");
+    game_env(L"BB_ONLINE_SERVER", online && online[0] ? online : L"127.0.0.1"); /* a BB_ONLINE_SERVER set before the launcher wins */
     /* The fight scene renders black without precise readbacks of linear images (shadPS4 issue
      * #4375, UFC 4, same engine); precise readbacks deadlock against the GPU write twins, so
      * those stay off. The game asks for flip rate 1 (30 Hz); its simulation follows the real
@@ -1692,10 +1692,9 @@ static void controls_open(void) {
 
 /* The window into the settings; patch switches go to bbport.ini when they changed. */
 static void online_controls(void) {
-    /* NHL 19: Online play stays Offline (the launcher sets the network mode itself). */
-    SendMessageW(control(ID_MODE), CB_SETCURSEL, ONLINE_OFFLINE, 0);
-    EnableWindow(control(ID_MODE), FALSE);
-    int mode = ONLINE_OFFLINE;
+    /* NHL 19 online (docs/nhl19-online.md): Offline, Join a host's server, or Host one here. */
+    EnableWindow(control(ID_MODE), !running);
+    int mode = clampi((int)SendMessageW(control(ID_MODE), CB_GETCURSEL, 0, 0), 3);
     EnableWindow(control(ID_ONLINE), !running && mode == ONLINE_JOIN);
     EnableWindow(control(ID_HOST), !running && mode == ONLINE_HOST);
     EnableWindow(control(ID_HOSTSCAN), !running && mode == ONLINE_HOST);

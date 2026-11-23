@@ -104,7 +104,7 @@ pth=$(ls "$stage"/python/python*._pth | head -1)
 printf 'python%s.zip\n.\n..\\scripts\n..\\tools\n' "$(basename "$pth" | sed 's/python\([0-9]*\)\._pth/\1/')" > "$pth"
 mkdir -p "$stage/scripts"; cp scripts/*.py "$stage/scripts/"
 cp tools/gen_import_names.py "$stage/tools/"
-for f in tools/ufc3_server.py tools/blaze_tdf.py tools/ufc3_auth.py tools/ufc3_games.py; do [[ -f $f ]] && cp "$f" "$stage/tools/"; done
+for f in tools/nhl19_server.py tools/ufc3_server.py tools/blaze_tdf.py tools/ufc3_auth.py tools/ufc3_games.py; do [[ -f $f ]] && cp "$f" "$stage/tools/"; done
 mkdir -p "$stage/patches"
 find patches -maxdepth 1 -type f -name '*.xml' -exec cp {} "$stage/patches/" \; 2>/dev/null || true
 if [[ -d patches/experiments ]]; then

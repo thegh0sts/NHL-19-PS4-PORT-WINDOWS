@@ -27,7 +27,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ufc3_auth  # noqa: E402
 import ufc3_server as base  # noqa: E402
-from blaze_tdf import INT, STRING, STRUCT, LIST, MAP, TIME, Struct, encode_struct  # noqa: E402
+from blaze_tdf import INT, STRING, STRUCT, LIST, MAP, TIME, OBJTYPE, NOTIFICATION, Struct, encode_struct  # noqa: E402
 
 SERVICE = 'nhl-2019-ps4'
 CLIENT_ID, SERVER_ID = 'NHL2019_PS4_CLIENT', 'NHL2019_PS4_SERVER'
@@ -49,6 +49,24 @@ base.CLIENT_CONFIG.update({
     # which the Blaze login then carries. Without it the machine goes to its error state (16) with
     # no message: the login stopped after /connect/tokeninfo.
     'blazeServerClientId': SERVER_ID,
+    # Dynamic messages (NHL_DYNAMIC_MSG, eboot 0x2fda894..0x2fdacee): the home screen's message
+    # tiles come from EA's "aruba" service at UNIFIED_MESSAGING_URL; this server answers /aruba/
+    # with no messages. Without the keys no request was ever made.
+    'UNIFIED_MESSAGING_URL': 'https://accounts.ea.com/aruba/',
+    'UNIFIED_MESSAGING_PROJECT_ID': 'nhl19',
+    'UNIFIED_MESSAGING_CLIENT_ID': CLIENT_ID,
+    'UNIFIED_MESSAGING_ENV': 'prod',
+    # The home screen's featured tiles (job nhl-job:online-config:featured-tiles:list:get, eboot
+    # 0x16a7f90) read these through nhl-data:online-config:info:get (0x1167f20), which looks them
+    # up in this Blaze config; a missing key fails the job ("Internal error.") and the home screen
+    # stays empty. Values are tile ids (strtol base 10); which id is which tile is in the game's UI
+    # data, so these are a first guess (override with NHL19_TILES=a,b,c,d).
+    **{f'MAIN_HUB_FEATURED_TILE_{n + 1}': v for n, v in
+       enumerate((os.environ.get('NHL19_TILES') or '1,2,3,4').split(',')[:4])},
+    # Ads (NHL_DYNAMIC_ADS, 0x2fd8b6a..0x2fd91fd): off.
+    'UNIFIED_MESSAGING_ADS_ENABLED': 'false',
+    'UNIFIED_MESSAGING_ADS_TIMEOUT': '5',
+    'UNIFIED_MESSAGING_ADS_TIMER': '60',
     # PIN telemetry (eboot 0x25cc37d): host, port (strtol base 10) and environment. Without them the
     # game opens a TCP connection to an empty host name right after Blaze connects. Port 443 reaches
     # this server (40443), which accepts the posts below.
@@ -147,6 +165,30 @@ def nucleus_answer(request: bytes) -> bytes:
         headers = BytesHeaderParser().parsebytes(head.partition(b'\r\n')[2] + b'\r\n\r\n')
         print(f'{base.stamp()} easo: sports login for {headers.get("X-UFC3-Online-Id", "Player")}', flush=True)
         return base.easo_login_answer(headers)
+    if path == '/xmshd/search':
+        # Roster check (NHL_ROSTER): the game searches EA's content service for a newer roster.
+        # UFC 3's JSON answer may not be what NHL reads; by default fail it as offline would
+        # (XMSHD_MODE=json keeps UFC 3's answer). The whole request is printed.
+        body = request.partition(b'\r\n\r\n')[2]
+        print(f'{base.stamp()} xmshd: search {" ".join(body.decode("utf-8", "replace").split())}', flush=True)
+        if os.environ.get('XMSHD_MODE') != 'json':
+            return b'HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'
+    if path.startswith('/aruba'):
+        # Dynamic messages (UNIFIED_MESSAGING_URL): the game's parser (eboot 0x2fdc340) looks up
+        # "triggers", then per entry "triggerid", "actions" and "attributes"; UFC 3's
+        # {"messages": []} has no "triggers". No messages: an empty list.
+        body = request.partition(b'\r\n\r\n')[2]
+        print(f'{base.stamp()} aruba: {path} asks {body[:400].decode("utf-8", "replace")}', flush=True)
+        # The home screen asks for trigger "HOME" and builds its tiles from the answer's actions:
+        # an empty list (or none) left it with no tiles. Offline the request fails and the game
+        # uses its built-in tiles, so fail it the same way (ARUBA_MODE=empty keeps the old answer).
+        if os.environ.get('ARUBA_MODE') == 'empty':
+            try:
+                asked = json.loads(body or b'{}').get('triggerids') or []
+            except ValueError:
+                asked = []
+            return base.json_answer('200 OK', {'triggers': [{'triggerid': str(t), 'actions': []} for t in asked]})
+        return b'HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'
     if path in ('/pinEvents', '/bugsentry/session/', '/bugsentry/session'):
         # Telemetry and crash-session posts: accepted and dropped.
         return base.json_answer('200 OK', {'status': 'ok'})
@@ -192,6 +234,72 @@ async def coordinator(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     finally:
         await base.close_writer(writer)
     print(f'{base.stamp()} qos coordinator: client {peer[0]}:{peer[1]} closed', flush=True)
+
+
+# Stats (component 7). The Online Versus screen asks getStatGroup (4) for "VersusSummary" and then
+# getStatsByGroupAsync (0x10): its reply is empty and the values come afterwards as the Stats
+# notification GetStatsAsyncNotification (0x32, in the eboot's notification table at 0x348c0d0),
+# a KeyScopedStatValues. Without it the screen waited forever. No stats are kept yet: every group
+# has no stats, so a player shows an empty record.
+STATS = 0x7
+GET_STAT_GROUP, GET_STATS_BY_GROUP_ASYNC, GET_STATS_ASYNC_NOTIFICATION = 0x4, 0x10, 0x32
+USER_ENTITY = (0x7802, 1)
+_pending_notes = []
+
+
+def _request_value(request, tag, default=None):
+    item = request.get(tag) if hasattr(request, 'get') else None
+    return item[1] if item else default
+
+
+def stat_group(request) -> bytes:
+    name = _request_value(request, 'NAME', '') or ''
+    return encode_struct([
+        ('CNAM', STRING, name), ('DESC', STRING, ''), ('ETYP', OBJTYPE, USER_ENTITY),
+        ('KSUM', MAP, (STRING, STRING, [])), ('META', STRING, ''), ('NAME', STRING, name),
+        ('STAT', LIST, (STRUCT, [])),
+    ])
+
+
+def stats_by_group_async(request) -> bytes:
+    name = _request_value(request, 'NAME', '') or ''
+    view = _request_value(request, 'VID', 0) or 0
+    entities = list((_request_value(request, 'EID', (INT, [])) or (INT, []))[1])
+    values = encode_struct([
+        ('GRNM', STRING, name), ('KEY', STRING, ''), ('LAST', INT, 1),
+        ('STS', STRUCT, [('STAT', LIST, (STRUCT, [
+            [('EID', INT, e), ('ETYP', OBJTYPE, USER_ENTITY), ('POFF', INT, 0), ('STAT', LIST, (STRING, []))]
+            for e in entities]))]),
+        ('VID', INT, view),
+    ])
+    for e in entities:
+        writer = base.CONNECTIONS.get(e)
+        if writer is not None:
+            _pending_notes.append((writer, base.Frame(STATS, GET_STATS_ASYNC_NOTIFICATION, 0, NOTIFICATION, values)))
+    print(f'{base.stamp()} stats: {name} for {entities} (view {view}): no stats yet', flush=True)
+    return b''
+
+
+_ufc3_send_game_notes = base.send_game_notes
+
+
+def _send_notes(notes):
+    # The Blaze loop calls this right after each reply: the stats notification goes out after the
+    # reply to getStatsByGroupAsync, as the client expects.
+    while _pending_notes:
+        writer, note = _pending_notes.pop(0)
+        try:
+            writer.write(note.encode())
+        except ConnectionError:
+            writer.close()
+        else:
+            print(f'{base.stamp()} stats: -> {note}', flush=True)
+    _ufc3_send_game_notes(notes)
+
+
+base.send_game_notes = _send_notes
+base.HANDLERS[(STATS, GET_STAT_GROUP)] = stat_group
+base.HANDLERS[(STATS, GET_STATS_BY_GROUP_ASYNC)] = stats_by_group_async
 
 
 async def main():
