@@ -835,10 +835,26 @@ static ABI int32_t np_webapi_context(int32_t lib, int32_t user) {
     if (net_log) LOG("PSN: web API context for library %d user %d -> 1", lib, user);
     return 1;
 }
+/* PSN push events (invitations, presence): the offline answer (signed out) made the game sign
+ * out of PSN and EA when it set up its event filter for online play ("...until you sign in to
+ * PlayStation Network"). A filter and a callback that never fire: no push events arrive. */
+static ABI int32_t np_push_filter(int32_t lib, int32_t handle, const char *service, uint32_t label,
+                                  const void *params, size_t count) {
+    (void)handle; (void)params;
+    LOG("PSN: push event filter for library %d, service %s label %u, %zu filter(s) -> 1",
+        lib, service ? service : "(none)", label, count);
+    return 1;
+}
+static ABI int32_t np_push_callback(int32_t user, int32_t filter, void *callback, void *arg) {
+    (void)callback; (void)arg;
+    LOG("PSN: push event callback for context %d filter %d -> 1", user, filter);
+    return 1;
+}
+static ABI int32_t np_push_ok(int32_t a, int32_t b) { (void)a; (void)b; return 0; }
 typedef struct {
     int used;
     int64_t id;
-    char body[1024];
+    char body[4096];
     size_t len, read_at;
 } WebReq;
 static WebReq web_reqs[8];
@@ -848,12 +864,15 @@ static const char *peer_name(void) {
     return n && *n ? n : "Rival";
 }
 static void profile_json(char *out, size_t cap, const char *ids) {
-    /* One object per account id. The local id uses this PC's player name. */
+    /* One object per account id. The local id uses this PC's player name. "avatarUrls" (what
+     * @default holds): NHL 19's Online Versus hub downloads the avatar right after the profile and
+     * shows "Failed to retrieve data" (code 9999) without one. Only *.ea.com reaches the online
+     * server, which answers /psn-avatar/ with a picture. */
     size_t n = 0;
     n += (size_t)snprintf(out + n, cap - n, "{\"profiles\":[");
     int first = 1;
     const char *p = ids;
-    while (*p && n + 160 < cap) {
+    while (*p && n + 600 < cap) {
         char tok[32]; int k = 0;
         while (*p && *p != ',' && *p != '&' && k < 31) tok[k++] = *p++;
         tok[k] = 0;
@@ -862,8 +881,11 @@ static void profile_json(char *out, size_t cap, const char *ids) {
         unsigned long long id = strtoull(tok, NULL, 10);
         const char *name = id == account_id() ? player_name() : peer_name();
         n += (size_t)snprintf(out + n, cap - n,
-            "%s{\"accountId\":\"%s\",\"onlineId\":\"%s\",\"personalDetail\":{\"displayName\":\"%s\"}}",
-            first ? "" : ",", tok, name, name);
+            "%s{\"accountId\":\"%s\",\"onlineId\":\"%s\",\"personalDetail\":{\"displayName\":\"%s\"},"
+            "\"avatarUrls\":[{\"size\":\"s\",\"avatarUrl\":\"https://accounts.ea.com/psn-avatar/%s/s.png\"},"
+            "{\"size\":\"m\",\"avatarUrl\":\"https://accounts.ea.com/psn-avatar/%s/m.png\"},"
+            "{\"size\":\"l\",\"avatarUrl\":\"https://accounts.ea.com/psn-avatar/%s/l.png\"}]}",
+            first ? "" : ",", tok, name, name, tok, tok, tok);
         first = 0;
         if (*p == '&' || *p == '?') break;
     }
@@ -1305,6 +1327,10 @@ static const RuntimeExport exports[] = {
     {"sceNpWebApiCreateRequest", np_webapi_request}, {"sceNpWebApiDeleteRequest", np_webapi_delete_request},
     {"sceNpWebApiReadData", np_webapi_read}, {"sceNpWebApiSendRequest", np_webapi_send2},
     {"sceNpWebApiSendRequest2", np_webapi_send2},
+    {"sceNpWebApiCreateExtdPushEventFilter", np_push_filter},
+    {"sceNpWebApiRegisterExtdPushEventCallbackA", np_push_callback},
+    {"sceNpWebApiUnregisterExtdPushEventCallback", np_push_ok},
+    {"sceNpWebApiDeleteExtdPushEventFilter", np_push_ok},
     {"sceHttpInit", http_init}, {"sceHttpCreateTemplate", http_template},
     {"sceHttpCreateConnectionWithURL", http_connection}, {"sceHttpCreateRequestWithURL", http_request},
     {"sceHttpCreateRequestWithURL2", http_request2}, {"sceHttpAddRequestHeader", http_add_header},

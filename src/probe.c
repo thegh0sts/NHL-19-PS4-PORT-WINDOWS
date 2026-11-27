@@ -282,7 +282,7 @@ static ABI void game_login_done(const unsigned char *session, const void *task_p
  * +0x10; rdi = listener, esi = request id). It looks the id up in a sorted table at
  * listener-0x10+0x48..+0x50 (8-byte entries: int request id, int job id, 0x2febd40) and completes
  * that job; with no entry nothing happens. Its hook prints the id and the table. */
-static ABI void game_listener_done(const unsigned char *listener, const void *id_value, const void *name) {
+static ABI __attribute__((unused)) void game_listener_done(const unsigned char *listener, const void *id_value, const void *name) {
     if (!listener || (uintptr_t)listener < 0x10000) return;
     const uint32_t id = (uint32_t)(uintptr_t)id_value;
     const unsigned char *object = listener - 0x10;
@@ -369,6 +369,60 @@ static ABI void game_login_state(const unsigned char *object, const void *unused
     fflush(stdout);
     last = state;
 }
+/* The game's call chain at a hook: return addresses up its rbp frames. A kind-2 thunk passes its
+ * stack pointer (rcx) and the game's rbp (r8): the 7 registers it pushed, then the game's return
+ * address. (The handler's own frame pointer can't be used: on Windows GCC points rbp into the
+ * middle of the frame.) */
+static void game_log_callers(const uint64_t *stack, uint64_t f) {
+    char a[48];
+    game_log_address(a, sizeof a, stack ? stack[7] : 0);
+    printf(" from %s; callers:", a);
+    for (int i = 0; i < 16 && f >= 0x10000 && !(f & 7); ++i) {
+        uint64_t next, ret;
+        memcpy(&next, (const void *)(uintptr_t)f, 8); memcpy(&ret, (const void *)(uintptr_t)(f + 8), 8);
+        game_log_address(a, sizeof a, ret);
+        printf(" %s", a);
+        if (next <= f || next - f > 0x100000) break;
+        f = next;
+    }
+    putchar('\n');
+    fflush(stdout);
+}
+/* 0x2fe25c0 is the online manager's Logout (vtable 0x58248c8; rdi = manager, rsi = user, ecx =
+ * reason: 0 general, 1 server_disc, 2 platform_signout, 3 user_controller_changed, names at
+ * 0x58249e0). It queues the logout that ends in SportsLoginService::Logout and "Press X to start".
+ * Its hook prints the reason and who decided it. rcx is on the thunk's stack (stack[3]): the thunk
+ * reuses rcx to pass that stack. */
+static ABI void game_online_logout(const unsigned char *manager, const void *user, const void *unused,
+                                   const uint64_t *stack, uint64_t rbp) {
+    (void)unused;
+    static const char *const reasons[] = {"general", "server_disc", "platform_signout", "user_controller_changed"};
+    const uint32_t reason = stack ? (uint32_t)stack[3] : 0xffffffffu;
+    printf("Game log: online logout (manager %p, user %p), reason %u (%s)", (const void *)manager, user,
+           reason, reason < 4 ? reasons[reason] : "?");
+    game_log_callers(stack, rbp);
+}
+/* 0x37258f0 resolves a job or data source by its URN ("nhl-job:...", "nhl-data:..."; rdx, a
+ * '/'-separated path hashed with FNV-1a) for the flow engine's step runner 0x37253b0, which reads
+ * the step's "urn" field and then invokes what this returns. Its hook lists the steps Online
+ * Versus takes before it gives up. (0x3741930, a by-name lookup in the registry 0x3741340 fills,
+ * was hooked first and never ran.) A name is printed once until 128 other names have been seen:
+ * data sources are asked every frame. */
+static ABI void game_job_lookup(const unsigned char *out, const void *registry, const void *name_value) {
+    (void)out; (void)registry;
+    const char *name = name_value;
+    if (!name || (uintptr_t)name < 0x10000) return;
+    uint32_t hash = 0x811c9dc5u;
+    size_t n = 0;
+    for (; n < 160 && name[n]; ++n) hash = (hash ^ (unsigned char)name[n]) * 0x1000193u;
+    static uint32_t seen[128];
+    static unsigned next;
+    for (unsigned i = 0; i < 128; ++i)
+        if (seen[i] == hash) return;
+    seen[next++ & 127] = hash;
+    printf("Game log: job %.*s\n", (int)n, name);
+    fflush(stdout);
+}
 /* kind 0: (string, format, va_list); 1: (logger, level, format, ...); 2: handler(rdi, rsi, rdx);
  * 3: handler(rbx); 4: handler(r14, r15). 3 and 4 are entered mid-function. */
 typedef struct { uint64_t text; unsigned char moved[24]; unsigned length; int kind; ABI void (*handler)(const unsigned char *, const void *, const void *); } GameLogHook;
@@ -383,9 +437,11 @@ static const GameLogHook game_log_hooks[] = {
                  0x48, 0x8d, 0x90, 0xa8, 0x00, 0x00, 0x00}, 17, 2, game_task_done},                  /* lea rdx,[rax+0xa8] */
     {0x45c2040, {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x50}, /* push rbp; mov rbp,rsp; push r15..r12, rbx, rax */
                  14, 2, game_login_done},
-    {0x2feba20, {0x55, 0x48, 0x89, 0xe5, 0x53, 0x50, 0xc6, 0x47, 0x30, 0x01,                       /* push rbp; mov rbp,rsp; push rbx, rax; mov byte [rdi+0x30],1 */
-                 0x48, 0x83, 0xc7, 0xf0}, 14, 2,                                                      /* add rdi,-0x10 */
-     (ABI void (*)(const unsigned char *, const void *, const void *))game_listener_done},
+    {0x37258f0, {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53,    /* push rbp; mov rbp,rsp; push r15..r12, rbx */
+                 0x48, 0x83, 0xec, 0x48}, 17, 2,                                                      /* sub rsp,0x48 */
+     (ABI void (*)(const unsigned char *, const void *, const void *))game_job_lookup},
+    /* replaced (one 4 KiB page holds 10 hooks): 0x2feba20 game_listener_done, 14 bytes
+     * 55 48 89 e5 53 50 c6 47 30 01 48 83 c7 f0 */
     {0x2feba3b, {0xc6, 0x43, 0x38, 0x01, 0x31, 0xf6, 0x31, 0xd2,                                   /* mov byte [rbx+0x38],1; xor esi,esi; xor edx,edx */
                  0x48, 0x89, 0xdf, 0x48, 0x8b, 0x03}, 14, 3, game_job_complete},                     /* mov rdi,rbx; mov rax,[rbx] */
     {0x396ae22, {0xbe, 0xff, 0xff, 0xff, 0xff, 0x31, 0xd2, 0x4c, 0x89, 0xf7,                       /* mov esi,-1; xor edx,edx; mov rdi,r14 */
@@ -393,8 +449,11 @@ static const GameLogHook game_log_hooks[] = {
      (ABI void (*)(const unsigned char *, const void *, const void *))game_lua_error},
     {0x2fe41a0, {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53,    /* push rbp; mov rbp,rsp; push r15..r12, rbx */
                  0x48, 0x81, 0xec, 0xc8, 0x00, 0x00, 0x00}, 20, 2, game_login_state},                /* sub rsp,0xc8 */
+    {0x2fe25c0, {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53,    /* push rbp; mov rbp,rsp; push r15..r12, rbx */
+                 0x48, 0x83, 0xec, 0x38}, 17, 2,                                                      /* sub rsp,0x38 */
+     (ABI void (*)(const unsigned char *, const void *, const void *))(ABI void (*)(void))game_online_logout},
 };
-enum { GAME_LOG_THUNK = 400 }; /* about 320 bytes used */
+enum { GAME_LOG_THUNK = 400 }; /* about 320 bytes used; 10 hooks fit one 4 KiB page */
 static unsigned char *game_log_thunk;
 static unsigned char *game_log_emit(unsigned char *p, const void *bytes, size_t n) { memcpy(p, bytes, n); return p + n; }
 static void game_log_install(unsigned char *base, Segment *segments, uint64_t ns) {
@@ -416,6 +475,9 @@ static void game_log_install(unsigned char *base, Segment *segments, uint64_t ns
                 0x48, 0x89, 0xf7,                                     /* mov rdi,rsi (format) */
                 0x48, 0x89, 0xd6};                                    /* mov rsi,rdx (va_list) */
             p = game_log_emit(p, head, k->kind >= 2 ? 9 : sizeof head); /* kind 2 keeps rdi, rsi, rdx */
+            /* kind 2 also passes rcx = its stack (pushed registers, then the game's return address)
+             * and r8 = the game's rbp; handlers that take three arguments ignore them */
+            if (k->kind == 2) { static const unsigned char sp[] = {0x48, 0x89, 0xe1, 0x49, 0x89, 0xe8}; p = game_log_emit(p, sp, sizeof sp); } /* mov rcx,rsp; mov r8,rbp */
             /* kind 3 is entered mid-function with rsp 16-aligned (not 8 as at an entry): 8 more */
             if (k->kind == 3) { static const unsigned char rbx[] = {0x48, 0x89, 0xdf, 0x48, 0x83, 0xec, 0x08}; p = game_log_emit(p, rbx, sizeof rbx); } /* mov rdi,rbx; sub rsp,8 */
             if (k->kind == 4) { static const unsigned char r[] = {0x4c, 0x89, 0xf7, 0x4c, 0x89, 0xfe, 0x48, 0x83, 0xec, 0x08}; p = game_log_emit(p, r, sizeof r); } /* mov rdi,r14; mov rsi,r15; sub rsp,8 */

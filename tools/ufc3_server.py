@@ -105,6 +105,7 @@ async def redirector(reader: asyncio.StreamReader, writer: asyncio.StreamWriter)
 # Blaze components (core only: Ultimate Team, live events and the rest are not offered).
 AUTHENTICATION, GAME_MANAGER, STATS, UTIL, MESSAGING, ASSOCIATION, GAME_REPORTING, USER_SESSIONS = (
     0x1, 0x4, 0x7, 0x9, 0xF, 0x19, 0x1C, 0x7802)
+LOGOUT, USER_UNAUTHENTICATED = 0x46, 0x9  # Authentication::logout, UserSessions notification
 OFFERED = [AUTHENTICATION, GAME_MANAGER, STATS, UTIL, MESSAGING, ASSOCIATION, GAME_REPORTING, USER_SESSIONS]
 CLIENT_CONFIG = {
     'pingPeriod': '15s', 'connIdleTimeout': '90s', 'defaultRequestTimeout': '60s',
@@ -267,6 +268,8 @@ async def blaze(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     session = None
     online_id = None
     notes = []
+    logged_out = None
+    signed_out = False  # logged out on this connection; it stays open for the next login
     try:
         while True:
             data = await reader.read(65536)
@@ -294,11 +297,11 @@ async def blaze(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
                         f.write(frame.payload)
                     text = (f'(partly decoded: {error}; raw payload in {raw})\n' + dump(request))
                 handler = HANDLERS.get((frame.component, frame.command))
-                known = handler or frame.component == ufc3_games.GAME_MANAGER or (frame.component, frame.command) in ((AUTHENTICATION, 0xa), (UTIL, 8))
+                known = handler or frame.component == ufc3_games.GAME_MANAGER or (frame.component, frame.command) in ((AUTHENTICATION, 0xa), (AUTHENTICATION, LOGOUT), (UTIL, 8))
                 print(f'{stamp()} blaze: {frame}{"" if known else "  (no handler: empty reply)"}', flush=True)
                 if text:
                     print('  ' + text.replace('\n', '\n  '), flush=True)
-                if not session and frame.component not in (UTIL, AUTHENTICATION):
+                if not session and not signed_out and frame.component not in (UTIL, AUTHENTICATION):
                     # A client that reconnected after a server restart resumes without logging in.
                     # Close it: the game then reports the lost connection and logs in again,
                     # instead of waiting forever on requests this server cannot attribute.
@@ -332,6 +335,13 @@ async def blaze(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
                     payload = friend_lists(session[0])
                     print(f'{stamp()} friends: {session[0].name} sees '
                           f'{len(ONLINE) - 1} other player(s)', flush=True)
+                elif (frame.component, frame.command) == (AUTHENTICATION, LOGOUT):
+                    # The game logs out and back in on the same connection. Tell it the logout is
+                    # done (UserSessions UserUnauthenticated, UserSessionLogoutInfo); without the
+                    # notification its next Blaze login never starts.
+                    payload = b''
+                    if session:
+                        logged_out = session[0]
                 elif (frame.component, frame.command) == (UTIL, 0x7):
                     payload = preauth_reply(request, writer.get_extra_info('sockname')[0])
                 elif frame.component == ufc3_games.GAME_MANAGER and session:
@@ -359,6 +369,18 @@ async def blaze(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
                 writer.write(Frame(frame.component, frame.command, frame.msg_num, REPLY, payload).encode())
                 send_game_notes(notes)
                 notes = []
+                if logged_out is not None:
+                    writer.write(Frame(USER_SESSIONS, USER_UNAUTHENTICATED, 0, NOTIFICATION,
+                                       encode_struct([('BID', INT, logged_out.id), ('USTP', INT, 0)])).encode())
+                    send_game_notes(ufc3_games.leave(logged_out.id, game_log, writer=writer))
+                    if CONNECTIONS.get(logged_out.id) is writer:
+                        CONNECTIONS.pop(logged_out.id, None)
+                        ONLINE.pop(logged_out.id, None)
+                    print(f'{stamp()} blaze: {logged_out.name} logged out, {len(ONLINE)} online', flush=True)
+                    session = None
+                    online_id = None
+                    logged_out = None
+                    signed_out = True
                 if (frame.component, frame.command) == (AUTHENTICATION, 0xa):
                     writer.write(Frame(USER_SESSIONS, 8, 0, NOTIFICATION,
                                        user_authenticated(*session)).encode())

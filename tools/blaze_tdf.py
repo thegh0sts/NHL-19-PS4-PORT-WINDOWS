@@ -102,6 +102,13 @@ def _encode_value(t: int, v) -> bytes:
         if v is None or v.member == 0x7f:
             return b'\x7f'
         return bytes([v.member]) + encode_tag(v.tag) + bytes([v.type]) + _encode_value(v.type, v.value)
+    if t == VARIABLE:
+        # (tdf id, fields) or None: a present flag, the class's TDF id (from its TypeDescription),
+        # then the class's members like a struct
+        if v is None:
+            return b'\0'
+        tdf_id, fields = v
+        return b'\1' + encode_int(tdf_id) + encode_struct(fields) + b'\0'
     if t == OBJTYPE:
         return encode_int(v[0]) + encode_int(v[1])
     if t == OBJID:

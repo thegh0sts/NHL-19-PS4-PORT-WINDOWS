@@ -7,14 +7,14 @@
 #   python-embed, aerolib.inl      downloaded from the URLs in packaging/windows/deps.lock and checked
 #                                  against their sha256 (once; kept in out/windows/downloads)
 #   third-party licences           from /clang64/share/licenses and the submodules
-# Result: dist/UFC3Native-windows-x86_64.zip (+ .sha256, .build.txt). Never: game files, caches, saves.
+# Result: dist/NHL19Native-windows-x86_64.zip (+ .sha256, .build.txt). Never: game files, caches, saves.
 # A dirty checkout is refused unless BB_ALLOW_DIRTY=1 (as package-windows.sh).
 set -euo pipefail
 cd -- "$(dirname -- "$0")/.."
 [[ ${MSYSTEM:-} == CLANG64 ]] || { echo "package-msys2: run this in the MSYS2 CLANG64 shell" >&2; exit 1; }
 root=${BB_WINDOWS_ROOT:-$PWD/out/windows}
-product=${BB_PRODUCT:-UFC3Native}          # archive folder and zip name
-launcher_exe=${BB_LAUNCHER_EXE:-UFC3.exe}  # what SacredFire.exe is called in the archive
+product=${BB_PRODUCT:-NHL19Native}          # archive folder and zip name
+launcher_exe=${BB_LAUNCHER_EXE:-NHL19.exe}  # what SacredFire.exe is called in the archive
 for tool in llvm-readobj llvm-strip python3 sha256sum curl; do
     command -v $tool >/dev/null || { echo "package-msys2: '$tool' is missing" >&2; exit 1; }
 done

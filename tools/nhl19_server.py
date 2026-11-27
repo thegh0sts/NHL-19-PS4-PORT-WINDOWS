@@ -27,7 +27,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ufc3_auth  # noqa: E402
 import ufc3_server as base  # noqa: E402
-from blaze_tdf import INT, STRING, STRUCT, LIST, MAP, TIME, OBJTYPE, NOTIFICATION, Struct, encode_struct  # noqa: E402
+from blaze_tdf import INT, STRING, BLOB, STRUCT, LIST, MAP, TIME, OBJTYPE, VARIABLE, NOTIFICATION, Struct, encode_struct  # noqa: E402
 
 SERVICE = 'nhl-2019-ps4'
 CLIENT_ID, SERVER_ID = 'NHL2019_PS4_CLIENT', 'NHL2019_PS4_SERVER'
@@ -135,6 +135,19 @@ base.preauth_reply = preauth_reply  # ufc3_server.blaze looks it up at call time
 _ufc3_nucleus_answer = base.nucleus_answer
 
 
+def _png(size, rgb):
+    import struct
+    import zlib
+    row = b'\0' + bytes(rgb) * size
+    def chunk(kind, data):
+        return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)
+    return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', size, size, 8, 2, 0, 0, 0))
+            + chunk(b'IDAT', zlib.compress(row * size)) + chunk(b'IEND', b''))
+
+
+AVATAR_PNG = _png(240, (0x1f, 0x3a, 0x5f))  # 240x240, PSN's large avatar size
+
+
 def nucleus_answer(request: bytes) -> bytes:
     """UFC 3's Nucleus answers, plus what NHL 19's identity library (the eboot's TokenInfoGet)
     reads from /connect/tokeninfo: client_id, scope, expires_in, pid_id, pid_type, user_id,
@@ -166,13 +179,17 @@ def nucleus_answer(request: bytes) -> bytes:
         print(f'{base.stamp()} easo: sports login for {headers.get("X-UFC3-Online-Id", "Player")}', flush=True)
         return base.easo_login_answer(headers)
     if path == '/xmshd/search':
-        # Roster check (NHL_ROSTER): the game searches EA's content service for a newer roster.
-        # UFC 3's JSON answer may not be what NHL reads; by default fail it as offline would
-        # (XMSHD_MODE=json keeps UFC 3's answer). The whole request is printed.
+        # Content search (CMS SearchFileHandler, "%ssearch"): during each online check the game
+        # looks for its store config (File_Type ps4_dimecfg_na; at boot it has no
+        # /temp0/commerce/dimecfg_na.xml). The answer is an EA::Online::CMS::SearchContentResult,
+        # whose reflected members (eboot 0x282ca20) are "count" and "files" (a list of
+        # ContentSummary); UFC 3's "results" is not read. A 503 here may be why Online Versus
+        # gives up and logs out: answer "no files" instead (XMSHD_MODE=offline keeps the 503).
         body = request.partition(b'\r\n\r\n')[2]
         print(f'{base.stamp()} xmshd: search {" ".join(body.decode("utf-8", "replace").split())}', flush=True)
-        if os.environ.get('XMSHD_MODE') != 'json':
+        if os.environ.get('XMSHD_MODE') == 'offline':
             return b'HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'
+        return base.json_answer('200 OK', {'count': 0, 'files': []})
     if path.startswith('/aruba'):
         # Dynamic messages (UNIFIED_MESSAGING_URL): the game's parser (eboot 0x2fdc340) looks up
         # "triggers", then per entry "triggerid", "actions" and "attributes"; UFC 3's
@@ -189,6 +206,12 @@ def nucleus_answer(request: bytes) -> bytes:
                 asked = []
             return base.json_answer('200 OK', {'triggers': [{'triggerid': str(t), 'actions': []} for t in asked]})
         return b'HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'
+    if path.startswith('/psn-avatar/'):
+        # The PSN profiles the runtime makes up point their avatarUrls here (Online Versus
+        # downloads the player's avatar): one plain picture for everybody.
+        print(f'{base.stamp()} avatar: {path}', flush=True)
+        return (b'HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: %d\r\n'
+                b'Connection: close\r\n\r\n' % len(AVATAR_PNG)) + AVATAR_PNG
     if path in ('/pinEvents', '/bugsentry/session/', '/bugsentry/session'):
         # Telemetry and crash-session posts: accepted and dropped.
         return base.json_answer('200 OK', {'status': 'ok'})
@@ -240,11 +263,16 @@ async def coordinator(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
 # getStatsByGroupAsync (0x10): its reply is empty and the values come afterwards as the Stats
 # notification GetStatsAsyncNotification (0x32, in the eboot's notification table at 0x348c0d0),
 # a KeyScopedStatValues. Without it the screen waited forever. No stats are kept yet: every group
-# has no stats, so a player shows an empty record.
+# has the columns below, all 0.
 STATS = 0x7
 GET_STAT_GROUP, GET_STATS_BY_GROUP_ASYNC, GET_STATS_ASYNC_NOTIFICATION = 0x4, 0x10, 0x32
 USER_ENTITY = (0x7802, 1)
 _pending_notes = []
+# The stat columns the game's summary jobs read (OnlinePlaynowSummary, eboot 0x1148e00: StatsList of
+# EntityId, DNF, Wins, Losses, OvertimeLosses, Mmr). With no columns in the group, the Online
+# Versus hub ran nhl-data:online:stats:online-playnow-summary:list:get and then cancelled,
+# left and logged out. Every player has 0 in each until results are stored.
+STAT_COLUMNS = ('DNF', 'Wins', 'Losses', 'OvertimeLosses', 'Mmr')
 
 
 def _request_value(request, tag, default=None):
@@ -257,7 +285,11 @@ def stat_group(request) -> bytes:
     return encode_struct([
         ('CNAM', STRING, name), ('DESC', STRING, ''), ('ETYP', OBJTYPE, USER_ENTITY),
         ('KSUM', MAP, (STRING, STRING, [])), ('META', STRING, ''), ('NAME', STRING, name),
-        ('STAT', LIST, (STRUCT, [])),
+        ('STAT', LIST, (STRUCT, [
+            [('CATG', STRING, name), ('DFLT', STRING, '0'), ('DRVD', INT, 0), ('FRMT', STRING, '%d'),
+             ('KIND', STRING, ''), ('LDSC', STRING, column), ('META', STRING, ''), ('NAME', STRING, column),
+             ('SDSC', STRING, column), ('TYPE', INT, 0)]
+            for column in STAT_COLUMNS])),
     ])
 
 
@@ -268,7 +300,8 @@ def stats_by_group_async(request) -> bytes:
     values = encode_struct([
         ('GRNM', STRING, name), ('KEY', STRING, ''), ('LAST', INT, 1),
         ('STS', STRUCT, [('STAT', LIST, (STRUCT, [
-            [('EID', INT, e), ('ETYP', OBJTYPE, USER_ENTITY), ('POFF', INT, 0), ('STAT', LIST, (STRING, []))]
+            [('EID', INT, e), ('ETYP', OBJTYPE, USER_ENTITY), ('POFF', INT, 0),
+             ('STAT', LIST, (STRING, ['0'] * len(STAT_COLUMNS)))]
             for e in entities]))]),
         ('VID', INT, view),
     ])
@@ -276,7 +309,7 @@ def stats_by_group_async(request) -> bytes:
         writer = base.CONNECTIONS.get(e)
         if writer is not None:
             _pending_notes.append((writer, base.Frame(STATS, GET_STATS_ASYNC_NOTIFICATION, 0, NOTIFICATION, values)))
-    print(f'{base.stamp()} stats: {name} for {entities} (view {view}): no stats yet', flush=True)
+    print(f'{base.stamp()} stats: {name} for {entities} (view {view}): all {len(STAT_COLUMNS)} stats 0', flush=True)
     return b''
 
 
@@ -293,13 +326,106 @@ def _send_notes(notes):
         except ConnectionError:
             writer.close()
         else:
-            print(f'{base.stamp()} stats: -> {note}', flush=True)
+            print(f'{base.stamp()} blaze: -> {note}', flush=True)
     _ufc3_send_game_notes(notes)
 
 
 base.send_game_notes = _send_notes
 base.HANDLERS[(STATS, GET_STAT_GROUP)] = stat_group
 base.HANDLERS[(STATS, GET_STATS_BY_GROUP_ASYNC)] = stats_by_group_async
+
+
+# Census data (component 0xa; commands from the eboot's name table at 0x586cb30: 1 subscribe,
+# 2 unsubscribe, 3 getRegionCounts, 4 getLatestCensusData, 5 subscribeToCensusDataUpdates;
+# notification 1 NotifyServerCensusData). Online Versus asks getLatestCensusData for its
+# matchmaking census ("players searching") and fell back to "Press X to start" when it got nothing.
+# The answer is a NotifyServerCensusData, as the reply and as the notification: a GameManager and a
+# UserManager census (variable TDFs; their TDF ids are in their TypeDescriptions, 0x3428490 and
+# 0x33d6760) with the players online and nobody in games or matchmaking.
+CENSUS = 0xa
+CENSUS_SUBSCRIBE, CENSUS_LATEST, CENSUS_UPDATES = 0x1, 0x4, 0x5
+NOTIFY_SERVER_CENSUS_DATA = 0x1
+GAME_MANAGER_CENSUS, USER_MANAGER_CENSUS = 0x558ce4ac, 0x220c16c2
+CENSUS_PERIOD, CENSUS_TIMEOUT, CENSUS_RESUBSCRIBE = 60_000_000, 180_000_000, 30_000_000  # microseconds
+
+
+def census_data() -> bytes:
+    online = len(base.ONLINE)
+    game_manager = [('AGN', INT, 0), ('GGN', INT, 0), ('JPN', INT, 0), ('LSN', INT, online),
+                    ('MMCD', STRUCT, []), ('MMSN', INT, 0), ('NUMM', INT, 0), ('PIGG', INT, 0)]
+    return encode_struct([
+        ('CNP', TIME, CENSUS_PERIOD), ('NTMT', TIME, CENSUS_TIMEOUT), ('RTMT', TIME, CENSUS_RESUBSCRIBE),
+        ('TDFL', LIST, (STRUCT, [
+            [('TDF', VARIABLE, (GAME_MANAGER_CENSUS, game_manager))],
+            [('TDF', VARIABLE, (USER_MANAGER_CENSUS, []))],
+        ])),
+    ])
+
+
+def _queue_census(what):
+    data = census_data()
+    for writer in list(base.CONNECTIONS.values()):
+        _pending_notes.append((writer, base.Frame(CENSUS, NOTIFY_SERVER_CENSUS_DATA, 0, NOTIFICATION, data)))
+    print(f'{base.stamp()} census: {what}; {len(base.ONLINE)} online, nobody matchmaking', flush=True)
+    return data
+
+
+def census_subscribe(request) -> bytes:
+    _queue_census('subscribed')
+    return b''
+
+
+def census_latest(request) -> bytes:
+    return _queue_census('latest asked')
+
+
+def census_updates(request) -> bytes:
+    # No notification here: with one per subscribe the game resubscribed every frame.
+    print(f'{base.stamp()} census: updates subscribed', flush=True)
+    return encode_struct([('CNP', TIME, CENSUS_PERIOD), ('NTMT', TIME, CENSUS_TIMEOUT),
+                          ('RTMT', TIME, CENSUS_RESUBSCRIBE)])
+
+
+base.HANDLERS[(CENSUS, CENSUS_SUBSCRIBE)] = census_subscribe
+
+
+# UserSessions lookupUsersIdentification (0x7802 cmd 0xf; the eboot's command names at 0x586d1b0
+# start at cmd 1). The Online Versus hub asks it for the players it shows (job
+# nhl-data:online-user:profiles:list:get) and answers "Failed to retrieve data" (code 9999) when
+# nobody comes back. The reply is a LookupUsersResponse: ULST, the UserIdentification of every
+# asked user the server knows (by blaze id, name or PSN id).
+USER_SESSIONS = 0x7802
+LOOKUP_USERS_IDENTIFICATION = 0xf
+
+
+def _find_account(user):
+    accounts = list(base.IDENTITIES.accounts.values())
+    blaze_id = _request_value(user, 'ID', 0) or 0
+    name = _request_value(user, 'NAME', '') or ''
+    external = _request_value(user, 'EXID', 0) or 0
+    for account in accounts:
+        if (blaze_id and account.id == blaze_id) or (name and account.name == name) \
+                or (external and account.psn_id == external):
+            return account
+    return None
+
+
+def user_identification(account):
+    return [('AID', INT, account.id), ('ALOC', INT, 1701729619), ('CNTY', INT, 21843), ('EXBB', BLOB, b''),
+            ('EXID', INT, account.psn_id), ('ID', INT, account.id), ('NAME', STRING, account.name),
+            ('NASP', STRING, 'cem_ea_id'), ('ORIG', INT, account.id), ('PIDI', INT, account.id)]
+
+
+def lookup_users_identification(request) -> bytes:
+    asked = (_request_value(request, 'ULST', (STRUCT, [])) or (STRUCT, []))[1]
+    found = [a for a in (_find_account(user) for user in asked) if a is not None]
+    print(f'{base.stamp()} users: lookup of {len(asked)}, found {[a.name for a in found]}', flush=True)
+    return encode_struct([('ULST', LIST, (STRUCT, [user_identification(a) for a in found]))])
+
+
+base.HANDLERS[(USER_SESSIONS, LOOKUP_USERS_IDENTIFICATION)] = lookup_users_identification
+base.HANDLERS[(CENSUS, CENSUS_LATEST)] = census_latest
+base.HANDLERS[(CENSUS, CENSUS_UPDATES)] = census_updates
 
 
 async def main():
