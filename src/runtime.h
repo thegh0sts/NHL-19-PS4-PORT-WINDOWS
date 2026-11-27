@@ -147,6 +147,26 @@ uintptr_t runtime_file_resolve(const char *name);
 uintptr_t runtime_services_resolve(const char *name);
 /* ufc3: online play (BB_ONLINE_SERVER); 0 for every name when it is not set. */
 uintptr_t runtime_net_resolve(const char *name);
+/* NHL 19 "Overtime online" (BB_ONLINE_PROFILE=overtime); the PSN account is the player's ShadNet one. */
+int runtime_net_overtime(void);
+/* runtime_shadnet.c: a ShadNet client (shadPS4's PSN service), sign-in and authorization codes only.
+ * server is host[:port] (port 31313 when left out). Each returns 1, or 0 with a reason in error;
+ * runtime_shadnet_auth_code also gives ShadNet's error number (-1: no answer or no connection, -2: no usable
+ * code, -3: the server signed this client out). */
+int runtime_shadnet_sign_in(const char *server, const char *npid, const char *password, const char *token,
+                            const char *title_id, const char *title_name, uint64_t *account_id, char *error, size_t error_size);
+int runtime_shadnet_auth_code(const char *client_id, const char *scope, char *code, size_t code_size, int *shadnet_error,
+                              char *error, size_t error_size);
+int runtime_shadnet_connected(void);
+int runtime_shadnet_refused(void); /* the server signed this client out (ClientRejected): for the whole session */
+void runtime_shadnet_close(void);
+/* runtime_tls.c: a TLS 1.2+ client stream over a connected socket (SNI when server_name is set; no
+ * certificate check). NULL with a reason in error when the handshake fails. */
+typedef struct RuntimeTls RuntimeTls;
+RuntimeTls *runtime_tls_open(uintptr_t socket, const char *server_name, char *error, size_t error_size);
+int runtime_tls_write(RuntimeTls *tls, const void *data, size_t size);
+long runtime_tls_read(RuntimeTls *tls, void *data, size_t size);
+void runtime_tls_close(RuntimeTls *tls);
 void runtime_file_report(void);
 void runtime_file_configure(const char *app0, const char *user);
 int runtime_file_mount(const char *guest, const char *host);

@@ -32,6 +32,7 @@ if [[ ! -f out/deps/prefix/include/vk_mem_alloc.h ]]; then bash tools/deps.sh; f
 export CMAKE_PREFIX_PATH="$PWD/out/deps/prefix${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
 read -r -a includes <<< "$(pkg-config --cflags vulkan sdl3)"
 read -r -a libraries <<< "$(pkg-config --libs vulkan sdl3)"
+libraries+=(-ldl) # runtime_tls.c loads OpenSSL 3 when Overtime online needs it
 # GPU library (shadPS4 video core + drivers), built by CMake into out/gpu/libbbgpu.so.
 # BB_PGO: generate (instrumented build that writes pgo/ while the game runs), use, off.
 # Default: use the profile in pgo/ when there is one. BB_LTO=OFF disables link-time optimization.
@@ -161,8 +162,11 @@ if [[ ${1:-} == --test ]]; then
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_eventflag.c "${runtime[@]}" out/libatrac9.a -lm -lZydis "${gpu[@]}" "${libraries[@]}" -o out/eventflag-test
     out/eventflag-test
     # ufc3 online: the PS4 network ABI (without the local server) and the Blaze/EASO server.
-    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_online_net.c src/runtime_net.c -o out/online-net-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_online_net.c src/runtime_net.c src/runtime_shadnet.c src/runtime_tls.c -ldl -o out/online-net-test
     out/online-net-test
+    # NHL 19 Overtime online: resolver, the ShadNet account, sceHttp over TLS (OpenSSL 3 at run time).
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_overtime_net.c src/runtime_net.c src/runtime_shadnet.c src/runtime_tls.c -ldl -o out/overtime-net-test
+    BB_OVERTIME_NET_TEST=out/overtime-net-test python3 -m unittest discover -s tests -p test_overtime_net.py
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc -Wl,--gc-sections -ffunction-sections tests/test_time_conversion.c -o out/time-conversion-test
     out/time-conversion-test
     python3 -m unittest discover -s tests -p test_online_server.py

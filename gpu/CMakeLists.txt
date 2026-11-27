@@ -236,7 +236,7 @@ if (WIN32)
     target_compile_options(sacredfire-game PRIVATE $<$<COMPILE_LANGUAGE:C>:${BB_C_WARNINGS}>)
     target_compile_definitions(sacredfire-game PRIVATE ${BB_WIN_DEFS} BB_BUILD_VERSION="${BB_BUILD_VERSION}")
     target_include_directories(sacredfire-game PRIVATE ${BB_SRC} ${BB_SRC}/src)
-    target_link_libraries(sacredfire-game PRIVATE bbgpu atrac9 Zydis::Zydis onecore bcrypt ws2_32 winmm -pthread)
+    target_link_libraries(sacredfire-game PRIVATE bbgpu atrac9 Zydis::Zydis onecore bcrypt ws2_32 secur32 winmm -pthread)
     # The PS4 range (64 GiB - 1 TiB) must stay free of host allocations: no high-entropy ASLR
     # (image ASLR and the other mitigations stay on; docs/sacredfire/13-windows-port.md). The
     # guest main thread runs on the process stack: 16 MiB, committed (no stack probes).
@@ -274,7 +274,7 @@ if (WIN32)
         target_compile_options(${test}-test PRIVATE ${BB_C_WARNINGS} -UNDEBUG) # the tests are assert()s
         target_compile_definitions(${test}-test PRIVATE ${BB_WIN_DEFS})
         target_include_directories(${test}-test PRIVATE ${BB_SRC} ${BB_SRC}/src)
-        target_link_libraries(${test}-test PRIVATE bbgpu atrac9 Zydis::Zydis onecore bcrypt ws2_32 -pthread)
+        target_link_libraries(${test}-test PRIVATE bbgpu atrac9 Zydis::Zydis onecore bcrypt ws2_32 secur32 -pthread)
         target_link_options(${test}-test PRIVATE -Wl,--disable-high-entropy-va)
         add_dependencies(windows-tests ${test}-test)
     endforeach()
@@ -294,6 +294,14 @@ if (WIN32)
     target_include_directories(deterministic-fp-test PRIVATE ${BB_SRC} ${BB_SRC}/src)
     target_link_libraries(deterministic-fp-test PRIVATE Zydis::Zydis onecore bcrypt -pthread)
     add_dependencies(windows-tests deterministic-fp-test)
+    # NHL 19 Overtime online: resolver, the ShadNet account, sceHttp over TLS (tests/test_overtime_net.py runs it).
+    add_executable(overtime-net-test EXCLUDE_FROM_ALL ${BB_SRC}/tests/test_overtime_net.c ${BB_SRC}/src/runtime_net.c ${BB_SRC}/src/runtime_shadnet.c ${BB_SRC}/src/runtime_tls.c)
+    set_target_properties(overtime-net-test PROPERTIES C_STANDARD 11 C_EXTENSIONS ON)
+    target_compile_options(overtime-net-test PRIVATE ${BB_C_WARNINGS} -UNDEBUG)
+    target_compile_definitions(overtime-net-test PRIVATE ${BB_WIN_DEFS})
+    target_include_directories(overtime-net-test PRIVATE ${BB_SRC} ${BB_SRC}/src)
+    target_link_libraries(overtime-net-test PRIVATE bcrypt ws2_32 secur32 -pthread)
+    add_dependencies(windows-tests overtime-net-test)
 endif()
 
 # Explicit test targets; neither launches the game nor needs a Vulkan device.
