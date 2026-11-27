@@ -50,6 +50,12 @@ export BB_NEO=${BB_NEO:-0}
 # that was never made (guest fault at 0x3846425, a null global); with the network mode on
 # (BB_ONLINE_SERVER: simulated PSN sign-in, only *.ea.com names resolve, to 127.0.0.1) start-up
 # continues. Nothing listens there, so the game finds no EA servers. BB_ONLINE_SERVER= (empty) turns it off.
+# NHL 19 "Overtime online" (BB_ONLINE_PROFILE=overtime): the Overtime servers, BB_OVERTIME_HOST
+# (default ot.puckpeak.com), with the Overtime patch set (patches.py reads the same variables).
+if [[ $profile == nhl19 && ${BB_ONLINE_PROFILE:-} == overtime ]]; then
+    export BB_ONLINE_SERVER=${BB_OVERTIME_HOST:-ot.puckpeak.com}
+    echo "run-msys2: NHL 19: Overtime online ($BB_ONLINE_SERVER)"
+fi
 if [[ $profile == nhl19 && -z ${BB_ONLINE_SERVER+set} ]]; then
     export BB_ONLINE_SERVER=127.0.0.1
     echo "run-msys2: NHL 19: network mode on (BB_ONLINE_SERVER=127.0.0.1)"

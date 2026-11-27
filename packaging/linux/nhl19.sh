@@ -6,6 +6,8 @@
 #                                   automatically) and remembers it
 # Settings: ~/.local/share/NHL19Native/sacredfire.ini (the launcher's, the same file as on Windows);
 # nhl19.conf there takes extra BB_* variables. A variable set in the environment wins over both.
+# Overtime online signs in with the player's ShadNet account (the launcher's Online tab, or
+# BB_SHADNET_ID and BB_SHADNET_PASSWORD).
 # Saves and the shader cache: ~/.local/share/NHL19Native/user. Logs: a logs folder beside this
 # script (or the AppImage), or ~/.local/share/NHL19Native/logs when that one can't be written.
 set -euo pipefail
@@ -91,6 +93,12 @@ if s.get('gamepad'): out['BB_GAMEPAD'] = s['gamepad']
 if s.get('player'): out['BB_USER_NAME'] = s['player']
 if s.get('language'): out['BB_LANGUAGE'] = s['language']
 if s.get('log_dir'): out['BB_LOG_DIR'] = s['log_dir']
+# Overtime online: run.sh points the game at Overtime's server, patches.py applies Overtime's patch set,
+# and the game signs in with the player's ShadNet account (the launcher keeps the password as "plain:").
+if s.get('online_mode') == 'overtime':
+    out['BB_ONLINE_PROFILE'] = 'overtime'
+    if s.get('shadnet_id'): out['BB_SHADNET_ID'] = s['shadnet_id']
+    if s.get('shadnet_password', '').startswith('plain:'): out['BB_SHADNET_PASSWORD'] = s['shadnet_password'][6:]
 out['BB_NEO'] = '1' if s.get('neo') == '1' else '0'
 if s.get('fps_limit'): out['BB_FPS_LIMIT'] = s['fps_limit']
 out['BB_PRESENT_MODE'] = pick('present_mode', ['Mailbox', 'Fifo', 'Immediate'], 1)
@@ -107,6 +115,10 @@ for k, v in out.items():
 PY
 )
 [[ -f $data/nhl19.conf ]] && export_unset < "$data/nhl19.conf"
+if [[ ${BB_ONLINE_PROFILE:-} == overtime && ( -z ${BB_SHADNET_ID:-} || -z ${BB_SHADNET_PASSWORD:-} ) ]]; then
+    say 'Overtime online signs in with your ShadNet account, the one shadPS4 uses: enter your ShadNet ID and password in the launcher (Online).'
+    exit 1
+fi
 
 # Logs beside the AppImage (or this script), as NHL19.exe does on Windows; the data folder when
 # that one can't be written (an AppImage in a read-only place, a system install).

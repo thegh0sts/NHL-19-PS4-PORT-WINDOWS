@@ -32,21 +32,98 @@
  * the image's absolute pointers). An instruction shorter than the 5-byte `jmp rel32` takes the
  * next instructions with it into the stub (copied, RIP-relative displacements adjusted);
  * that is refused when one of those is a branch target or changes control flow, and the
- * site then keeps the CPU's instruction (counted in the log). */
+ * site then keeps the CPU's instruction (counted in the log).
+ *
+ * NHL 19 "Overtime online" (BB_ONLINE_PROFILE=overtime) plays against Overtime's shadPS4 players,
+ * so it follows shadPS4's rule instead of the one above (shadPS4 src/core/cpu_patches.cpp,
+ * GenerateReciprocalInstruction): on AMD and other CPUs the instructions stay native; on Intel
+ * (CPUID vendor GenuineIntel) every rcpps / vrcpps / rsqrtps / vrsqrtps computes the CPU's own
+ * estimate XOR a delta that turns it into AMD's result, delta = xor[index_table[x >> 11]] per
+ * lane, with shadPS4's tables (src/runtime_fp_amd.h); NaN lanes give the input unchanged. The
+ * scalar forms stay native, as in shadPS4. Guest threads always get the MXCSR above, as shadPS4's
+ * do. BB_DETERMINISTIC_FP has no effect there; BB_OVERTIME_FP=native|tables|zero forces a rule
+ * (tests only: the wrong rule on a real CPU desyncs against shadPS4; zero = the table path with
+ * zero deltas, which must equal native). */
 #include "runtime.h"
+#include "runtime_fp_amd.h"
 #include <Zydis/Zydis.h>
+#include <cpuid.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-int runtime_fp_deterministic(void) {
+static int overtime_profile(void) {
+    const char *profile = getenv("BB_ONLINE_PROFILE");
+    return profile && !strcmp(profile, "overtime");
+}
+
+int runtime_fp_cpu_intel(void) {
+    unsigned a, b, c, d;
+    if (!__get_cpuid(0, &a, &b, &c, &d)) return 0;
+    return b == 0x756e6547 && d == 0x49656e69 && c == 0x6c65746e; /* "Genu" "ineI" "ntel" */
+}
+
+RuntimeFpRule runtime_fp_rule_for(int overtime, const char *deterministic, const char *server, int intel, const char *force) {
+    if (overtime) {
+        if (force && !strcmp(force, "native")) return RUNTIME_FP_NATIVE;
+        if (force && !strcmp(force, "tables")) return RUNTIME_FP_AMD_TABLES;
+        if (force && !strcmp(force, "zero")) return RUNTIME_FP_ZERO_TABLES;
+        return intel ? RUNTIME_FP_AMD_TABLES : RUNTIME_FP_NATIVE;
+    }
+    if (deterministic && *deterministic) return deterministic[0] == '1' ? RUNTIME_FP_EXACT : RUNTIME_FP_NATIVE;
+    return server && *server ? RUNTIME_FP_EXACT : RUNTIME_FP_NATIVE;
+}
+
+RuntimeFpRule runtime_fp_rule(void) {
     static int value = -1;
     if (value < 0) {
-        const char *forced = getenv("BB_DETERMINISTIC_FP"), *server = getenv("BB_ONLINE_SERVER");
-        value = forced && *forced ? forced[0] == '1' : server && *server;
+        const int overtime = overtime_profile(), intel = runtime_fp_cpu_intel();
+        const char *force = getenv("BB_OVERTIME_FP");
+        value = (int)runtime_fp_rule_for(overtime, getenv("BB_DETERMINISTIC_FP"), getenv("BB_ONLINE_SERVER"), intel, force);
+        if (overtime && force && *force) {
+            if (strcmp(force, "native") && strcmp(force, "tables") && strcmp(force, "zero"))
+                printf("Overtime FP: BB_OVERTIME_FP=%s is not native, tables or zero; ignored\n", force);
+            else
+                printf("Overtime FP: WARNING: BB_OVERTIME_FP=%s forces the %s rule on this %s CPU. For tests only: "
+                       "against real players it desyncs unless it is the CPU's own rule (%s).\n", force,
+                       value == RUNTIME_FP_NATIVE ? "native" : value == RUNTIME_FP_AMD_TABLES ? "AMD-table" : "zero-table",
+                       intel ? "Intel" : "non-Intel", intel ? "tables" : "native");
+        }
     }
+    return (RuntimeFpRule)value;
+}
+
+int runtime_fp_deterministic(void) {
+    static int value = -1;
+    if (value < 0) value = overtime_profile() || runtime_fp_rule() == RUNTIME_FP_EXACT;
     return value;
+}
+
+/* shadPS4's index tables, expanded from the header's blocks on first use (2 MiB each). */
+const uint8_t *runtime_fp_amd_index(int rsqrt) {
+    static uint8_t *tables[2];
+    rsqrt = !!rsqrt;
+    if (!tables[rsqrt]) {
+        const char *map = rsqrt ? amd_rsqrt_map : amd_rcp_map;
+        const char *const *blocks = rsqrt ? amd_rsqrt_blocks : amd_rcp_blocks;
+        const unsigned block_count = rsqrt ? sizeof(amd_rsqrt_blocks) / sizeof(*amd_rsqrt_blocks)
+                                           : sizeof(amd_rcp_blocks) / sizeof(*amd_rcp_blocks);
+        uint8_t *t = calloc((size_t)1 << 21, 1);
+        if (!t) return NULL;
+        for (unsigned i = 0; i < 512; ++i) {
+            const unsigned b = (unsigned)(map[i] - 'A');
+            if (b >= block_count) { free(t); return NULL; }
+            if (blocks[b])
+                for (unsigned j = 0; j < 4096; ++j) t[i * 4096 + j] = (uint8_t)(blocks[b][j] - 'A');
+        }
+        tables[rsqrt] = t;
+    }
+    return tables[rsqrt];
+}
+const uint32_t *runtime_fp_amd_xor(int rsqrt, unsigned *count) {
+    if (count) *count = rsqrt ? sizeof(amd_rsqrt_xor) / sizeof(*amd_rsqrt_xor) : sizeof(amd_rcp_xor) / sizeof(*amd_rcp_xor);
+    return rsqrt ? amd_rsqrt_xor : amd_rcp_xor;
 }
 
 /* Orbis' floating-point environment, set on every thread that runs guest code (attach). */
@@ -144,6 +221,52 @@ __asm__(".text\n.intel_syntax noprefix\n"
         FP_PACKED(bb_fp_rcp, FP_RCP) FP_PACKED(bb_fp_rsqrt, FP_RSQRT)
         ".att_syntax prefix\n");
 void bb_fp_rcp4(void), bb_fp_rcp8(void), bb_fp_rcp1(void), bb_fp_rsqrt4(void), bb_fp_rsqrt8(void), bb_fp_rsqrt1(void);
+
+/* Overtime online's table rule (shadPS4's on Intel), packed forms only. The cores keep rax, rcx and
+ * rdx on the stack, so the slot is at [rsp+256]. bb_ot_tables: per table set (AMD at +0, zero at
+ * +32) the rcp index table, the rsqrt index table, the rcp xor values and the rsqrt xor values,
+ * set by runtime_fp_patch_image. Per lane: the CPU's estimate XOR xor[index[x >> 11]]; NaN lanes
+ * take x unchanged (as shadPS4's vblendvps does). xmm0: x, result; xmm1-4, rax, rcx, rdx scratch. */
+void *bb_ot_tables[8];
+#define OT_LANE(i)                                                                                 \
+    "vpextrd eax, xmm1, " #i "\n movzx eax, byte ptr [rcx+rax]\n mov eax, [rdx+rax*4]\n"              \
+    "vpinsrd xmm2, xmm2, eax, " #i "\n"
+#define OT_BODY(index, values, estimate)                                                           \
+    "mov rcx, [rip+bb_ot_tables+" #index "]\n mov rdx, [rip+bb_ot_tables+" #values "]\n"             \
+    "vpsrld xmm1, xmm0, 11\n vmovd eax, xmm1\n movzx eax, byte ptr [rcx+rax]\n mov eax, [rdx+rax*4]\n" \
+    "vmovd xmm2, eax\n" OT_LANE(1) OT_LANE(2) OT_LANE(3)                                             \
+    estimate " xmm3, xmm0\n vxorps xmm3, xmm3, xmm2\n"                                               \
+    "vcmpunordps xmm4, xmm0, xmm0\n vblendvps xmm0, xmm3, xmm0, xmm4\n"
+#define OT_PUSH "push rax\n push rcx\n push rdx\n"
+#define OT_POP "pop rdx\n pop rcx\n pop rax\n"
+#define OT_PACKED(name, index, values, estimate)                                                   \
+    ".globl " #name "4\n.p2align 4\n" #name "4:\n" FP_SAVE OT_PUSH "vmovdqu xmm0, [rsp+256]\n"       \
+    OT_BODY(index, values, estimate) "vmovdqu [rsp+256], xmm0\n" OT_POP FP_RESTORE                   \
+    ".globl " #name "8\n.p2align 4\n" #name "8:\n" FP_SAVE OT_PUSH "vmovdqu xmm0, [rsp+256]\n"       \
+    OT_BODY(index, values, estimate) "vmovdqu [rsp+256], xmm0\n vmovdqu xmm0, [rsp+272]\n"           \
+    OT_BODY(index, values, estimate) "vmovdqu [rsp+272], xmm0\n" OT_POP FP_RESTORE
+__asm__(".text\n.intel_syntax noprefix\n"
+        OT_PACKED(bb_ot_amd_rcp, 0, 16, "vrcpps") OT_PACKED(bb_ot_amd_rsqrt, 8, 24, "vrsqrtps")
+        OT_PACKED(bb_ot_zero_rcp, 32, 48, "vrcpps") OT_PACKED(bb_ot_zero_rsqrt, 40, 56, "vrsqrtps")
+        ".att_syntax prefix\n");
+void bb_ot_amd_rcp4(void), bb_ot_amd_rcp8(void), bb_ot_amd_rsqrt4(void), bb_ot_amd_rsqrt8(void);
+void bb_ot_zero_rcp4(void), bb_ot_zero_rcp8(void), bb_ot_zero_rsqrt4(void), bb_ot_zero_rsqrt8(void);
+
+/* The table pointers for `rule`; 0 when a table could not be made. */
+static int ot_tables(RuntimeFpRule rule) {
+    static uint8_t *zero;
+    void **set = bb_ot_tables + (rule == RUNTIME_FP_ZERO_TABLES ? 4 : 0);
+    if (rule == RUNTIME_FP_ZERO_TABLES) {
+        if (!zero && !(zero = calloc((size_t)1 << 21, 1))) return 0;
+        set[0] = set[1] = zero;
+    } else {
+        set[0] = (void *)runtime_fp_amd_index(0);
+        set[1] = (void *)runtime_fp_amd_index(1);
+        if (!set[0] || !set[1]) return 0;
+    }
+    set[2] = (void *)amd_rcp_xor; set[3] = (void *)amd_rsqrt_xor;
+    return 1;
+}
 
 /* ---- the patch ---- */
 enum { JMP = 5, MAX_STUB = 384 };
@@ -427,8 +550,14 @@ static int relative_jump(const ZydisDecodedInstruction *in) {
 
 uint64_t runtime_fp_patch_image(unsigned char *image, uint64_t size, const uint64_t *seg_address, const uint64_t *seg_size,
                                 const uint64_t *seg_flags, uint64_t segments, const uint64_t *pointers, uint64_t pointer_count,
-                                void *(*map_near)(size_t), RuntimeFpStats *stats) {
+                                void *(*map_near)(size_t), RuntimeFpRule rule, RuntimeFpStats *stats) {
     memset(stats, 0, sizeof(*stats));
+    const int tables = rule == RUNTIME_FP_AMD_TABLES || rule == RUNTIME_FP_ZERO_TABLES;
+    if (rule == RUNTIME_FP_NATIVE) return 0;
+    if (tables && !ot_tables(rule)) {
+        fputs("STOP: Overtime FP: no memory for the AMD tables\n", stderr);
+        exit(21);
+    }
     ZydisDecoder decoder;
     ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
     Scan c = {image, seg_address, seg_size, seg_flags, segments, calloc(size / 8 + 1, 1)};
@@ -452,8 +581,10 @@ uint64_t runtime_fp_patch_image(unsigned char *image, uint64_t size, const uint6
             if (in.raw.modrm.offset && in.raw.modrm.mod == 0 && in.raw.modrm.rm == 5 && in.raw.disp.size == 32)
                 mark(&c, next + (uint64_t)in.raw.disp.value, size);
             switch (in.mnemonic) {
-            case ZYDIS_MNEMONIC_RCPPS: case ZYDIS_MNEMONIC_VRCPPS: case ZYDIS_MNEMONIC_RSQRTPS: case ZYDIS_MNEMONIC_VRSQRTPS:
             case ZYDIS_MNEMONIC_RCPSS: case ZYDIS_MNEMONIC_VRCPSS: case ZYDIS_MNEMONIC_RSQRTSS: case ZYDIS_MNEMONIC_VRSQRTSS:
+                if (tables) break; /* the table rule leaves the scalar forms native, as shadPS4 does */
+                /* fall through */
+            case ZYDIS_MNEMONIC_RCPPS: case ZYDIS_MNEMONIC_VRCPPS: case ZYDIS_MNEMONIC_RSQRTPS: case ZYDIS_MNEMONIC_VRSQRTPS:
                 if (count == capacity) {
                     uint64_t *grown = realloc(sites, (capacity = capacity ? capacity * 2 : 4096) * 2 * sizeof(*sites));
                     if (!grown) { free(sites); free(ranges); free(c.targets); return 0; }
@@ -472,8 +603,16 @@ uint64_t runtime_fp_patch_image(unsigned char *image, uint64_t size, const uint6
     unsigned char *area = count ? map_near(area_size) : NULL;
     if (!area) { stats->unpatched = count; free(sites); free(c.targets); return 0; }
     unsigned char **cores = (unsigned char **)area;
-    cores[0] = (unsigned char *)bb_fp_rcp4; cores[1] = (unsigned char *)bb_fp_rcp8; cores[2] = (unsigned char *)bb_fp_rcp1;
-    cores[3] = (unsigned char *)bb_fp_rsqrt4; cores[4] = (unsigned char *)bb_fp_rsqrt8; cores[5] = (unsigned char *)bb_fp_rsqrt1;
+    if (rule == RUNTIME_FP_AMD_TABLES) {
+        cores[0] = (unsigned char *)bb_ot_amd_rcp4; cores[1] = (unsigned char *)bb_ot_amd_rcp8; cores[2] = NULL;
+        cores[3] = (unsigned char *)bb_ot_amd_rsqrt4; cores[4] = (unsigned char *)bb_ot_amd_rsqrt8; cores[5] = NULL;
+    } else if (rule == RUNTIME_FP_ZERO_TABLES) {
+        cores[0] = (unsigned char *)bb_ot_zero_rcp4; cores[1] = (unsigned char *)bb_ot_zero_rcp8; cores[2] = NULL;
+        cores[3] = (unsigned char *)bb_ot_zero_rsqrt4; cores[4] = (unsigned char *)bb_ot_zero_rsqrt8; cores[5] = NULL;
+    } else {
+        cores[0] = (unsigned char *)bb_fp_rcp4; cores[1] = (unsigned char *)bb_fp_rcp8; cores[2] = (unsigned char *)bb_fp_rcp1;
+        cores[3] = (unsigned char *)bb_fp_rsqrt4; cores[4] = (unsigned char *)bb_fp_rsqrt8; cores[5] = (unsigned char *)bb_fp_rsqrt1;
+    }
     unsigned char *p = area + table;
     uint64_t covered_until = 0;
     /* Pass 2: a stub per site; the instructions it displaces go with it. */
@@ -490,7 +629,7 @@ uint64_t runtime_fp_patch_image(unsigned char *image, uint64_t size, const uint6
             if (here >= end || (length && is_target(&c, here)) ||
                 !ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, image + here, end - here, &in, op))) { ok = 0; break; }
             Site s;
-            if (describe(&in, op, image + here, here, &s)) {
+            if (describe(&in, op, image + here, here, &s) && !(tables && s.scalar)) { /* a native scalar one moves as it is */
                 if (!(q = emit_site(q, &s, image, cores))) ok = 0;
                 ++emulated;
             } else if (length && length + in.length >= JMP && relative_jump(&in)) {
@@ -521,7 +660,10 @@ uint64_t runtime_fp_patch_image(unsigned char *image, uint64_t size, const uint6
             ok = rel32(q + 5, image + at + length, &back) && rel32(image + at + JMP, stub, &to_stub);
         }
         if (!ok) {
-            if (stats->unpatched++ < 8) printf("Deterministic FP: the instruction at image offset 0x%" PRIx64 " is kept (the next ones cannot move)\n", at);
+            /* Overtime: every one, as each runs the CPU's own estimate, which shadPS4 on Intel does not */
+            if (tables) printf("Overtime FP: the instruction at image offset 0x%" PRIx64 " keeps the CPU's estimate (the next ones cannot move)\n", at);
+            else if (stats->unpatched < 8) printf("Deterministic FP: the instruction at image offset 0x%" PRIx64 " is kept (the next ones cannot move)\n", at);
+            ++stats->unpatched;
             continue;
         }
         memcpy(q + 1, &back, 4);

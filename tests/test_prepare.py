@@ -3,7 +3,7 @@ import struct
 import unittest
 import tempfile
 from pathlib import Path
-from prepare import parse_self, inspect_libc, nid
+from prepare import parse_self, inspect_libc, mapped_size, nid
 
 
 def fixture():
@@ -75,6 +75,20 @@ class SelfTests(unittest.TestCase):
         struct.pack_into('<Q', data, 32, 0x100800)
         with self.assertRaisesRegex(ValueError, 'segment index'):
             parse_self(data)
+
+
+class MappedSizeTests(unittest.TestCase):
+    def test_executable_segment_runs_to_its_page_end(self):
+        text = dict(vaddr=0, memsz=0x56ea4b0, flags=5)
+        relro = dict(vaddr=0x56ec000, memsz=0x278000, flags=4)
+        data = dict(vaddr=0x5964000, memsz=0x9bb060, flags=6)
+        loads = [text, relro, data]
+        self.assertEqual(mapped_size(text, loads, 0x631f060), 0x56ec000)  # NHL 19 1.60: caves up to 0x56ec000
+        self.assertEqual(mapped_size(relro, loads, 0x631f060), 0x278000)  # not executable: as it is
+        self.assertEqual(mapped_size(data, loads, 0x631f060), 0x9bb060)
+        relro['vaddr'] = 0x56eb000
+        self.assertEqual(mapped_size(text, loads, 0x631f060), 0x56eb000)  # short of the next segment
+        self.assertEqual(mapped_size(text, [text], 0x56ea4b0), 0x56ea4b0)  # and of the image end
 
 
 if __name__ == '__main__':

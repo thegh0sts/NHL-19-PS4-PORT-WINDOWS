@@ -120,9 +120,10 @@ static int auto_setting=1;
 static int auto_ports(void) {
     static int env=-2;
     if (env==-2) {
-        const char *online=getenv("BB_ONLINE_SERVER"), *v=getenv("BB_LOCAL_MULTIPLAYER");
-        env=online && *online ? 0 : v && *v ? v[0]!='0' : -1;
-        if (online && *online) printf("Runtime: one player per controller off: online (one local user)\n");
+        const char *server=getenv("BB_ONLINE_SERVER"), *profile=getenv("BB_ONLINE_PROFILE"), *v=getenv("BB_LOCAL_MULTIPLAYER");
+        const int online=(server && *server) || (profile && !strcmp(profile,"overtime"));
+        env=online ? 0 : v && *v ? v[0]!='0' : -1;
+        if (online) printf("Runtime: one player per controller off: online (one local user)\n");
     }
     return env>=0 ? env : auto_setting;
 }
