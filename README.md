@@ -36,7 +36,7 @@ and HUD drawn, at 60 FPS on a modern PC. Most other modes haven't been tested ye
 | Saves | Profile and game-mode saves work, without the low-storage warning (since v0.2.1) |
 | Controller | Working (one local player for now) |
 | Local multiplayer (several controllers) | Not yet |
-| Online play | Not available: EA's NHL 19 servers are gone (see [Online](#online)) |
+| Online play | Online Versus on Overtime's community servers, with a ShadNet account (see [Online](#online)) |
 | Trophies | Recorded locally |
 | Intel CPUs | Working: the game's AMD-only SSE4a instructions are emulated |
 | Linux | Test builds only, not tested by the developer (see [Linux](#linux-test-builds)) |
@@ -102,13 +102,53 @@ Unzip the new release over the old one, or into a new folder. Your settings and 
 
 ## Online
 
-NHL 19's online modes needed EA's servers, which no longer run for this game. The port starts the
-game in a network mode with no server behind it: without a network, the game crashes during
-start-up, so this is on all the time. The game then behaves like a PS4 that can't reach EA, and
-plays offline.
+NHL 19's online modes needed EA's servers, which no longer run for this game. The port can play
+online on **[Overtime](https://github.com/MatusRiedl/nhl19-pc-online-overtime)**'s community
+servers instead, run by Puck Peak. You play Online Versus against Overtime's players, who use
+shadPS4, and against other players of this port.
 
-The UFC 3 port has its own replacement server for online fights. NHL 19 uses the same EA online
-system underneath, so a replacement server may be possible later, but it would be a large project.
+### How to connect
+
+1. **Get a ShadNet account.** ShadNet is shadPS4's free replacement for PSN, and Overtime uses it to
+   sign players in. If you already play on shadPS4 with a ShadNet account, use that one. If not,
+   create one in the Overtime app's Multiplayer tab or on the shadPS4 website.
+2. **Open `NHL19.exe`** and set **Online play** to **Overtime online**.
+3. **Enter your ShadNet ID and password** in the two fields that appear (they take the place of the
+   Join and Host address rows). The password is saved encrypted for your Windows user.
+4. **Press Play.** The launcher applies the patch set every Overtime player runs (matches only stay
+   in step when both games run the same code), and the game signs you in to ShadNet.
+5. **In the game**, press X at the title screen, wait for it to connect to EA SPORTS, then go to
+   **Online Versus**.
+
+The **Discord** button in the launcher opens Puck Peak's Discord (gg.puckpeak.com): the place to
+find opponents and get help with the server.
+
+**If it doesn't connect:**
+
+- Play is refused in Overtime online without a ShadNet ID and password: fill in both.
+- If the game won't sign in, ShadNet didn't accept the account. The log names ShadNet's reason
+  (a wrong password, for example). Passwords are never written to the log.
+- The log also shows the netplay fingerprint. When a match ends early, compare it with your
+  opponent's: both of you need the same patch set.
+- You need the same game version as everyone else: CUSA11126 with update 1.60.
+
+### Other ways to start it
+
+- **New launcher** (`bin\NHL19Launcher.exe`, and Linux): the **Online** tab has the same choice and
+  the same two fields.
+- **From a `.bat` file**: set `BB_ONLINE_PROFILE=overtime`, `BB_SHADNET_ID` and
+  `BB_SHADNET_PASSWORD` before starting `NHL19.exe`.
+- **Linux**: `nhl19.sh` uses the launcher's Online settings, or the same three variables, and stops
+  with a message when there's no ShadNet account.
+
+Technical details (patches, TLS, the ShadNet sign-in, tests) are in
+[`docs/nhl19-online.md`](docs/nhl19-online.md#overtime-online).
+
+### Without Overtime
+
+With **Online play** set to **Offline**, the game behaves like a PS4 that can't reach EA, and plays
+offline. A replacement server of this project's own, for playing a friend directly, is in progress
+but not ready yet.
 
 ## Linux (test builds)
 
@@ -359,6 +399,10 @@ This port is built on the work of:
 - **SacredFire** (T3CHNOLOG1C): the loader and launcher the UFC 3 port grew from
 - **bbport** (deadinside28): the original native PS4 loader approach
 - **[shadPS4](https://github.com/shadps4-emu/shadPS4)**: the Vulkan graphics backend and much PS4 knowledge
+- **[Overtime](https://github.com/MatusRiedl/nhl19-pc-online-overtime)** by Puck Peak (MIT): the
+  online server this port plays on, and NHL 19 game-fix and online patches. **Matus Riedl**
+  ([MatusRiedl](https://github.com/MatusRiedl)) added Overtime online play to this port: ShadNet
+  sign-in, TLS, shadPS4-matching math and the launcher's Overtime mode
 - SDL3, Dear ImGui, Vulkan, Zydis, xxHash, fmt, sirit, LibAtrac9, miniz, AMD FidelityFX FSR and
   others: see [`licenses/`](licenses/)
 
