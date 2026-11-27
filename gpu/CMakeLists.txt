@@ -254,7 +254,7 @@ if (WIN32)
     target_compile_options(sacredfire PRIVATE ${BB_C_WARNINGS} -municode) # wWinMain: UTF-16 arguments
     target_link_options(sacredfire PRIVATE -municode -mwindows)
     target_compile_definitions(sacredfire PRIVATE ${BB_WIN_DEFS} BB_BUILD_VERSION="${BB_BUILD_VERSION}")
-    target_link_libraries(sacredfire PRIVATE comctl32 shlwapi ole32 shell32 uuid user32 gdi32)
+    target_link_libraries(sacredfire PRIVATE comctl32 shlwapi ole32 shell32 uuid user32 gdi32 crypt32)
     # Windows versions of the runtime tests and the ABI/TLS/memory probes (tests/windows): built
     # with `ninja windows-tests`, run on real Windows (Wine as a diagnostic).
     add_custom_target(windows-tests)
@@ -385,6 +385,9 @@ add_executable(nhl-launcher EXCLUDE_FROM_ALL ${BB_LAUNCHER_SRC}/nhl_launcher.cpp
     third_party/imgui/backends/imgui_impl_sdlrenderer3.cpp)
 target_include_directories(nhl-launcher PRIVATE ${BB_LAUNCHER_SRC} third_party/imgui third_party/imgui/backends)
 target_link_libraries(nhl-launcher PRIVATE PkgConfig::SDL3)
+if (WIN32)
+    target_link_libraries(nhl-launcher PRIVATE crypt32) # the ShadNet password, encrypted for the Windows user (DPAPI)
+endif()
 target_compile_definitions(nhl-launcher PRIVATE BB_BUILD_VERSION="${BB_BUILD_VERSION}"
     BB_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans.ttf"
     BB_BOLD_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans-Bold.ttf")

@@ -44,6 +44,7 @@
 #include <shlwapi.h>
 #include <tlhelp32.h>
 #include <wincodec.h>
+#include <wincrypt.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -64,6 +65,9 @@ typedef struct {
      * IPv4 address of this PC the friend reaches: LAN or VPN). BB_ONLINE_SERVER is the one in use. */
     int online_mode;
     wchar_t join_address[256], host_address[64];
+    /* Overtime online: the player's ShadNet account (shadPS4's PSN service). sacredfire.ini keeps the
+     * password encrypted for this Windows user (DPAPI, "dpapi:<hex>"). */
+    wchar_t shadnet_id[17], shadnet_password[128];
     int neo, fullscreen, clear_cache, validation, frame_stats, menu_trace;
     /* UFC 3, as the GoW3R launcher's Video panel: the PS4 output size, the frame-rate cap,
      * the swapchain present mode; show_fps mirrors bbport.ini. */
@@ -128,7 +132,8 @@ static const wchar_t *const managed_env[] = {
     L"BB_READBACKS", L"BB_READBACK_LINEAR", L"BB_GPU_WRITE_TWINS", L"BB_WRITE_WINDOW", L"BB_FLIP_RATE", L"BB_VBLANK_HZ",
     L"BB_Z16S8_AS_D16", L"BB_PREUPLOAD", L"BB_WRITE_STEP", L"BB_COPY_GPU_BUFFERS", L"BB_FPS_LIMIT", L"BB_PRESENT_MODE",
     L"BB_INTERNAL_WIDTH", L"BB_INTERNAL_HEIGHT", L"BB_WINDOW_SIZE", L"BB_USER_NAME", L"BB_SKIP_MOVIES", L"BB_SKIP_MOVIE_FILE", L"BB_FSR1", L"BB_RCAS", L"BB_RCAS_ATTENUATION",
-    L"BB_LANGUAGE", L"BB_ONLINE_SERVER", L"BB_FRAME_LOG", L"BB_READBACK_LOG", L"BB_PATCHES_DIR", L"BB_PATCHES_CONFIG",
+    L"BB_LANGUAGE", L"BB_ONLINE_SERVER", L"BB_ONLINE_PROFILE", L"BB_FRAME_LOG", L"BB_READBACK_LOG", L"BB_PATCHES_DIR", L"BB_PATCHES_CONFIG",
+    L"BB_SHADNET_ID", L"BB_SHADNET_PASSWORD",
 };
 static wchar_t managed_value[sizeof(managed_env) / sizeof(managed_env[0])][1024];
 static int managed_given[sizeof(managed_env) / sizeof(managed_env[0])];
@@ -151,10 +156,14 @@ static const wchar_t *given_env(const wchar_t *name) {
     return NULL;
 }
 static int clampi(int v, int n) { return v < 0 || v >= n ? 0 : v; }
-/* Online play (online_mode= in sacredfire.ini; before it, a non-empty online_server= meant Join). */
-enum { ONLINE_OFFLINE, ONLINE_JOIN, ONLINE_HOST };
-static const wchar_t *const online_mode_names[] = {L"Offline", L"Join server", L"Host server"};
-static const wchar_t *const online_mode_ids[] = {L"offline", L"join", L"host"};
+/* Online play (online_mode= in sacredfire.ini; before it, a non-empty online_server= meant Join).
+ * Overtime online: Puck Peak Overtime's servers, where this port plays the game's own Online Versus
+ * with Overtime's shadPS4 players (BB_ONLINE_PROFILE=overtime; BB_OVERTIME_HOST names a test server). */
+enum { ONLINE_OFFLINE, ONLINE_JOIN, ONLINE_HOST, ONLINE_OVERTIME };
+static const wchar_t *const online_mode_names[] = {L"Offline", L"Join server", L"Host server", L"Overtime online"};
+static const wchar_t *const online_mode_ids[] = {L"offline", L"join", L"host", L"overtime"};
+#define OVERTIME_HOST L"ot.puckpeak.com"
+#define OVERTIME_DISCORD L"https://gg.puckpeak.com"
 
 static int exists(const wchar_t *path) { return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES; }
 static void join(wchar_t *out_path, size_t n, const wchar_t *a, const wchar_t *b) {
@@ -203,6 +212,46 @@ static void read_game_version(char *version, size_t n) {
     fclose(f);
 }
 static void settings_path(wchar_t *out_path) { join(out_path, PATHW, data, L"sacredfire.ini"); }
+/* The ShadNet password in sacredfire.ini: "dpapi:<hex>", encrypted for this Windows user; only this
+ * user on this PC reads it back. Anything else reads as no password. */
+static void password_encode(const wchar_t *password, wchar_t *out, size_t out_n) {
+    static const wchar_t digits[] = L"0123456789abcdef";
+    out[0] = 0;
+    char utf8[512];
+    const int n = password[0] ? WideCharToMultiByte(CP_UTF8, 0, password, -1, utf8, sizeof utf8, NULL, NULL) : 0;
+    DATA_BLOB in = {(DWORD)(n > 1 ? n - 1 : 0), (BYTE *)utf8}, blob = {0};
+    if (n > 1 && CryptProtectData(&in, L"ShadNet password", NULL, NULL, NULL, CRYPTPROTECT_UI_FORBIDDEN, &blob)) {
+        if (6 + (size_t)blob.cbData * 2 < out_n) {
+            wcscpy(out, L"dpapi:");
+            for (DWORD i = 0; i < blob.cbData; ++i) {
+                out[6 + i * 2] = digits[blob.pbData[i] >> 4]; out[7 + i * 2] = digits[blob.pbData[i] & 15];
+            }
+            out[6 + blob.cbData * 2] = 0;
+        }
+        LocalFree(blob.pbData);
+    }
+    SecureZeroMemory(utf8, sizeof utf8);
+}
+static int hex_digit(wchar_t c) { return c >= L'0' && c <= L'9' ? c - L'0' : c >= L'a' && c <= L'f' ? c - L'a' + 10 : -1; }
+static void password_decode(const wchar_t *text, wchar_t *out, size_t out_n) {
+    out[0] = 0;
+    if (wcsncmp(text, L"dpapi:", 6)) return;
+    text += 6;
+    const size_t len = wcslen(text);
+    BYTE bytes[2048];
+    if (!len || len % 2 || len / 2 > sizeof bytes) return;
+    for (size_t i = 0; i < len / 2; ++i) {
+        const int hi = hex_digit(text[i * 2]), lo = hex_digit(text[i * 2 + 1]);
+        if (hi < 0 || lo < 0) return;
+        bytes[i] = (BYTE)(hi << 4 | lo);
+    }
+    DATA_BLOB in = {(DWORD)(len / 2), bytes}, plain = {0};
+    if (!CryptUnprotectData(&in, NULL, NULL, NULL, NULL, CRYPTPROTECT_UI_FORBIDDEN, &plain)) return;
+    const int n = MultiByteToWideChar(CP_UTF8, 0, (const char *)plain.pbData, (int)plain.cbData, out, (int)out_n - 1);
+    out[n > 0 ? n : 0] = 0;
+    SecureZeroMemory(plain.pbData, plain.cbData);
+    LocalFree(plain.pbData);
+}
 static void settings_load(void) {
     wchar_t path[PATHW]; settings_path(path);
     FILE *f = _wfopen(path, L"r, ccs=UTF-8");
@@ -219,8 +268,10 @@ static void settings_load(void) {
         else if (!wcscmp(line, L"player")) wcsncpy(settings.player, value, 16);
         else if (!wcscmp(line, L"online_server")) wcsncpy(settings.join_address, value, 255); /* Join's address */
         else if (!wcscmp(line, L"host_address")) wcsncpy(settings.host_address, value, 63);
+        else if (!wcscmp(line, L"shadnet_id")) wcsncpy(settings.shadnet_id, value, 16);
+        else if (!wcscmp(line, L"shadnet_password")) password_decode(value, settings.shadnet_password, COUNT(settings.shadnet_password));
         else if (!wcscmp(line, L"online_mode")) {
-            for (int i = 0; i < 3; ++i) if (!wcscmp(online_mode_ids[i], value)) { settings.online_mode = i; mode_saved = 1; }
+            for (int i = 0; i < COUNT(online_mode_ids); ++i) if (!wcscmp(online_mode_ids[i], value)) { settings.online_mode = i; mode_saved = 1; }
         }
         else if (!wcscmp(line, L"neo")) settings.neo = _wtoi(value);
         else if (!wcscmp(line, L"fullscreen")) settings.fullscreen = _wtoi(value);
@@ -249,6 +300,8 @@ static void settings_save(void) {
     if (!f) return;
     fwprintf(f, L"player=%ls\nonline_mode=%ls\nonline_server=%ls\nhost_address=%ls\n", settings.player,
              online_mode_ids[settings.online_mode], settings.join_address, settings.host_address);
+    wchar_t password[1024]; password_encode(settings.shadnet_password, password, COUNT(password));
+    fwprintf(f, L"shadnet_id=%ls\nshadnet_password=%ls\n", settings.shadnet_id, password);
     fwprintf(f, L"game=%ls\ngamepad=%ls\nneo=%d\nfullscreen=%d\nclear_cache=%d\nvalidation=%d\nframe_stats=%d\nmenu_trace=%d\n"
                 L"resolution=%d\nfps_limit=%ls\npresent_mode=%d\nupscaler=%d\nsharpness=%d\ndisplay=%d\nskip_movies=%d\nlanguage=%ls\nlog_dir=%ls\n",
              settings.game, settings.gamepad, settings.neo, settings.fullscreen, settings.clear_cache, settings.validation,
@@ -878,8 +931,24 @@ static DWORD play_impl(const wchar_t *const *extra, int extra_count) {
      * tools/ufc45-4k-test.sh and ufc46-1440p-test.sh run them); a BB_PATCHES_DIR or
      * BB_PATCHES_CONFIG the launcher was started with wins. */
     const wchar_t *experiment = resolution_experiment[settings.resolution];
+    /* Overtime online (the window's choice, or BB_ONLINE_PROFILE=overtime from a .bat): patches.py
+     * applies Overtime's patch set from patches\ and checks its netplay fingerprint, so 2K / 4K keep
+     * their picture size without the experiment's patches. */
+    game_env(L"BB_ONLINE_PROFILE", settings.online_mode == ONLINE_OVERTIME ? L"overtime" : NULL);
+    const int overtime = !wcscmp(env_or(L"BB_ONLINE_PROFILE", L""), L"overtime");
+    if (overtime && (settings.online_mode == ONLINE_JOIN || settings.online_mode == ONLINE_HOST)) {
+        fail(L"BB_ONLINE_PROFILE=overtime does not go with Join or Host server: choose Overtime online."); return 2;
+    }
+    /* Overtime online signs in with the player's ShadNet account (a BB_SHADNET_ID / _PASSWORD the
+     * launcher was started with wins); the account never goes to a game that is not Overtime online. */
+    game_env(L"BB_SHADNET_ID", overtime && settings.shadnet_id[0] ? settings.shadnet_id : NULL);
+    game_env(L"BB_SHADNET_PASSWORD", overtime && settings.shadnet_password[0] ? settings.shadnet_password : NULL);
+    if (overtime && (!env_or(L"BB_SHADNET_ID", NULL) || !env_or(L"BB_SHADNET_PASSWORD", NULL))) {
+        fail(L"Overtime online signs in with your ShadNet account, the one shadPS4 uses: enter your ShadNet ID and password.");
+        return 2;
+    }
     wchar_t patches_dir[PATHW], patches_config[PATHW];
-    if (experiment) {
+    if (experiment && !overtime) {
         join(patches_dir, PATHW, root, L"patches\\experiments"); join(patches_dir, PATHW, patches_dir, experiment);
         join(patches_config, PATHW, patches_dir, resolution_experiment_config[settings.resolution]);
         if (!given_env(L"BB_PATCHES_CONFIG") && !exists(patches_config)) {
@@ -891,7 +960,12 @@ static DWORD play_impl(const wchar_t *const *extra, int extra_count) {
     const wchar_t *patches_config_used = given_env(L"BB_PATCHES_CONFIG") ? given_env(L"BB_PATCHES_CONFIG") : patches_config;
     const wchar_t *patch_args[] = {L"--patches-dir", patches_dir_used, L"--patches-config", patches_config_used,
                                    L"--app-version", L"01.60", L"--title-id", L"CUSA11126", L"--out", out, L"--settings", config};
-    if (script(L"scripts", L"patches.py", patch_args, 12, NULL, 0)) { fail(L"patches.py failed (see the log)"); return 2; }
+    if (script(L"scripts", L"patches.py", patch_args, 12, NULL, 0)) {
+        fail(overtime ? L"patches.py failed (see the log): Overtime online needs Overtime's patch set as its players have it "
+                        L"(patches\\NHL19-Overtime.xml and NHL19-Overtime-Online.xml)."
+                      : L"patches.py failed (see the log)");
+        return 2;
+    }
     /* The count of guest TCB loads the linker rewrote (link.json fs_loads_patched): the game
      * executable cross-checks its own scan against it. */
     wchar_t tls_loads[32] = L"-1";
@@ -925,8 +999,10 @@ static DWORD play_impl(const wchar_t *const *extra, int extra_count) {
     game_env(L"BB_LANGUAGE", language_ids[settings.language]); /* a BB_LANGUAGE set before the launcher (a .bat) wins */
     /* NHL 19: Offline still runs the network mode, with no server (BB_ONLINE_SERVER=127.0.0.1): that
      * gets the game past its offline start-up crash (a null online-service global read by the sim
-     * thread). Join: the host's server; Host: tools\nhl19_server.py on this PC, at its address. */
-    const wchar_t *online = settings.online_mode == ONLINE_HOST ? settings.host_address :
+     * thread). Join: the host's server; Host: tools\nhl19_server.py on this PC, at its address;
+     * Overtime online: Overtime's server (the runtime and patches.py read BB_OVERTIME_HOST too). */
+    const wchar_t *online = overtime ? env_or(L"BB_OVERTIME_HOST", OVERTIME_HOST) :
+                            settings.online_mode == ONLINE_HOST ? settings.host_address :
                             settings.online_mode == ONLINE_JOIN ? settings.join_address : NULL;
     if (settings.online_mode == ONLINE_JOIN && !settings.join_address[0] && !given_env(L"BB_ONLINE_SERVER")) {
         fail(L"Join server: enter the host's IP address."); return 2;
@@ -999,7 +1075,17 @@ static DWORD play_impl(const wchar_t *const *extra, int extra_count) {
     logw(L"NHL 19: player name \"%ls\", language %ls (BB_LANGUAGE)\n", env_or(L"BB_USER_NAME", L"Player 1"), env_or(L"BB_LANGUAGE", L"1"));
     {
         const wchar_t *server = env_or(L"BB_ONLINE_SERVER", L"");
-        if (server[0]) logw(L"NHL 19: online server %ls (BB_ONLINE_SERVER)\n", server); else logw(L"NHL 19: offline (no BB_ONLINE_SERVER)\n");
+        if (overtime) {
+            /* patches.py wrote the netplay fingerprint of the applied patches; it must equal the
+             * Overtime players' (the log shows it for help with a match that ends early). */
+            char fingerprint[64] = "";
+            wchar_t path[PATHW], fingerprint_w[64]; join(path, PATHW, out, L"netplay_fingerprint.txt");
+            FILE *f = _wfopen(path, L"rb");
+            if (f) { if (!fgets(fingerprint, sizeof(fingerprint), f)) fingerprint[0] = 0; fclose(f); trim(fingerprint); }
+            MultiByteToWideChar(CP_UTF8, 0, fingerprint[0] ? fingerprint : "none", -1, fingerprint_w, 64); fingerprint_w[63] = 0;
+            logw(L"NHL 19: Overtime online, server %ls, ShadNet ID %ls, netplay fingerprint %ls; in the game: Online Versus\n",
+                 env_or(L"BB_OVERTIME_HOST", OVERTIME_HOST), env_or(L"BB_SHADNET_ID", L"?"), fingerprint_w);
+        } else if (server[0]) logw(L"NHL 19: online server %ls (BB_ONLINE_SERVER)\n", server); else logw(L"NHL 19: offline (no BB_ONLINE_SERVER)\n");
     }
     if (experiment)
         logw(L"4K/2K experimental: in game choose VIDEO -> Favor Resolution (the scene grows only with it). %ls scene, PS4 Pro %ls, "
@@ -1227,7 +1313,7 @@ static void add_to_steam(void) {
 
 /* ---- the window ---- */
 enum { ID_GAME = 100, ID_BROWSE, ID_PLAYER, ID_LANGUAGE, ID_ONLINE, ID_MODE, ID_HOST, ID_HOSTSCAN, ID_COPYHOST, ID_GAMEPAD, ID_RESCAN, ID_CONTROLS, ID_RESOLUTION, ID_DISPLAY, ID_FPS, ID_PRESENT, ID_UPSCALER, ID_SHARPNESS, ID_SHOWFPS, ID_FULLSCREEN, ID_NEO, ID_SKIPMOVIES, ID_CLEAR, ID_VALIDATION, ID_STATS, ID_TRACE, ID_LOGDIR, ID_LOGDIR_BROWSE,
-       ID_PLAY, ID_STOP, ID_STEAM, ID_LOGS, ID_DATA, ID_LOG, ID_LAST };
+       ID_PLAY, ID_STOP, ID_STEAM, ID_LOGS, ID_DATA, ID_LOG, ID_SHADNET_ID, ID_SHADNET_PASSWORD, ID_DISCORD, ID_LAST };
 static HWND controls[ID_LAST - 100];
 static int running;
 static float scale = 1.0f;
@@ -1691,14 +1777,36 @@ static void controls_open(void) {
 }
 
 /* The window into the settings; patch switches go to bbport.ini when they changed. */
+static HWND online_note, join_label, host_label;
+static const wchar_t host_note[] =
+    L"Host: share this PC's address with your friend (Copy IP). Outside your LAN both PCs need a VPN: "
+    L"choose this PC's VPN IP. The server starts with Play and stops with the game.";
+static const wchar_t overtime_note[] =
+    L"Overtime online: Online Versus with Overtime players (shadPS4 and this port). Sign in with your "
+    L"ShadNet account, as in shadPS4; the password is kept encrypted on this PC. Discord: opponents, help.";
 static void online_controls(void) {
-    /* NHL 19 online (docs/nhl19-online.md): Offline, Join a host's server, or Host one here. */
+    /* NHL 19 online (docs/nhl19-online.md): Offline, Join a host's server, Host one here, or Overtime online. */
     EnableWindow(control(ID_MODE), !running);
-    int mode = clampi((int)SendMessageW(control(ID_MODE), CB_GETCURSEL, 0, 0), 3);
+    int mode = clampi((int)SendMessageW(control(ID_MODE), CB_GETCURSEL, 0, 0), COUNT(online_mode_names));
+    const int overtime = mode == ONLINE_OVERTIME;
     EnableWindow(control(ID_ONLINE), !running && mode == ONLINE_JOIN);
     EnableWindow(control(ID_HOST), !running && mode == ONLINE_HOST);
     EnableWindow(control(ID_HOSTSCAN), !running && mode == ONLINE_HOST);
     EnableWindow(control(ID_COPYHOST), mode == ONLINE_HOST);
+    /* Overtime online: ShadNet ID and password in the Join / Host address rows, Discord in the
+     * Rescan / Copy IP row. */
+    ShowWindow(control(ID_ONLINE), overtime ? SW_HIDE : SW_SHOW);
+    ShowWindow(control(ID_HOST), overtime ? SW_HIDE : SW_SHOW);
+    ShowWindow(control(ID_SHADNET_ID), overtime ? SW_SHOW : SW_HIDE);
+    ShowWindow(control(ID_SHADNET_PASSWORD), overtime ? SW_SHOW : SW_HIDE);
+    EnableWindow(control(ID_SHADNET_ID), !running);
+    EnableWindow(control(ID_SHADNET_PASSWORD), !running);
+    if (join_label) SetWindowTextW(join_label, overtime ? L"ShadNet ID" : L"Join address");
+    if (host_label) SetWindowTextW(host_label, overtime ? L"Password" : L"Host address");
+    ShowWindow(control(ID_HOSTSCAN), overtime ? SW_HIDE : SW_SHOW);
+    ShowWindow(control(ID_COPYHOST), overtime ? SW_HIDE : SW_SHOW);
+    ShowWindow(control(ID_DISCORD), overtime ? SW_SHOW : SW_HIDE);
+    if (online_note) SetWindowTextW(online_note, overtime ? overtime_note : host_note);
 }
 /* 2K / 4K run in PS4 Pro mode: the box shows it on and locked; the user's own choice (neo_user)
  * comes back with 720p / 1080p and is what sacredfire.ini keeps. */
@@ -1720,19 +1828,25 @@ static void fill_host_addresses(void) {
     if (current[0]) SetWindowTextW(control(ID_HOST), current);
     else if (local_address_count) SendMessageW(control(ID_HOST), CB_SETCURSEL, 0, 0);
 }
-static void copy_host_address(void) {
-    wchar_t text[256], ip[64]; GetWindowTextW(control(ID_HOST), text, COUNT(text));
-    address_token(text, ip, COUNT(ip));
-    if (!ip[0] || !OpenClipboard(main_window)) return;
-    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, (wcslen(ip)+1)*sizeof(wchar_t));
+static int copy_text(const wchar_t *text) {
+    int copied = 0;
+    if (!text[0] || !OpenClipboard(main_window)) return 0;
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, (wcslen(text)+1)*sizeof(wchar_t));
     if (memory) {
         void *dest = GlobalLock(memory);
         if (dest) {
-            memcpy(dest, ip, (wcslen(ip)+1)*sizeof(wchar_t)); GlobalUnlock(memory);
-            EmptyClipboard(); if (!SetClipboardData(CF_UNICODETEXT, memory)) GlobalFree(memory);
+            memcpy(dest, text, (wcslen(text)+1)*sizeof(wchar_t)); GlobalUnlock(memory);
+            EmptyClipboard(); copied = SetClipboardData(CF_UNICODETEXT, memory) != NULL;
+            if (!copied) GlobalFree(memory);
         } else GlobalFree(memory);
     }
     CloseClipboard();
+    return copied;
+}
+static void copy_host_address(void) {
+    wchar_t text[256], ip[64]; GetWindowTextW(control(ID_HOST), text, COUNT(text));
+    address_token(text, ip, COUNT(ip));
+    copy_text(ip);
 }
 static void read_controls(void) {
     GetWindowTextW(control(ID_GAME), settings.game, PATHW); trimw(settings.game);
@@ -1744,11 +1858,20 @@ static void read_controls(void) {
         settings.player[k] = 0;
         SetWindowTextW(control(ID_PLAYER), settings.player);
     }
-    settings.online_mode = clampi((int)SendMessageW(control(ID_MODE), CB_GETCURSEL, 0, 0), 3);
+    settings.online_mode = clampi((int)SendMessageW(control(ID_MODE), CB_GETCURSEL, 0, 0), COUNT(online_mode_names));
     GetWindowTextW(control(ID_ONLINE), settings.join_address, COUNT(settings.join_address));
     trimw(settings.join_address);
     wchar_t host[256]; GetWindowTextW(control(ID_HOST), host, COUNT(host));
     address_token(host, settings.host_address, COUNT(settings.host_address));
+    {
+        /* A ShadNet ID: up to 16 characters, printable ASCII; the password as typed. */
+        wchar_t id[64]; GetWindowTextW(control(ID_SHADNET_ID), id, 64); trimw(id);
+        int k = 0;
+        for (int i = 0; id[i] && k < 16; ++i) if (id[i] > 0x20 && id[i] < 0x7f) settings.shadnet_id[k++] = id[i];
+        settings.shadnet_id[k] = 0;
+        SetWindowTextW(control(ID_SHADNET_ID), settings.shadnet_id);
+        GetWindowTextW(control(ID_SHADNET_PASSWORD), settings.shadnet_password, COUNT(settings.shadnet_password));
+    }
     int sel = (int)SendMessageW(control(ID_GAMEPAD), CB_GETCURSEL, 0, 0);
     if (sel > 0 && sel <= gamepad_count) wcsncpy(settings.gamepad, gamepads[sel - 1].guid, 127); else settings.gamepad[0] = 0;
     settings.fullscreen = checked(ID_FULLSCREEN); settings.neo = neo_user; settings.skip_movies = checked(ID_SKIPMOVIES); settings.clear_cache = checked(ID_CLEAR);
@@ -1901,6 +2024,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
         else if (id == ID_MODE && code == CBN_SELCHANGE) online_controls();
         else if (id == ID_HOSTSCAN && !running) fill_host_addresses();
         else if (id == ID_COPYHOST) copy_host_address();
+        else if (id == ID_DISCORD) ShellExecuteW(window, L"open", OVERTIME_DISCORD, NULL, NULL, SW_SHOWNORMAL);
         else if (id == ID_BROWSE) { wchar_t folder[PATHW]; if (pick_folder(L"The game folder (CUSA11126; CUSA11126-patch beside it is merged automatically)", folder)) {
             SetWindowTextW(control(ID_GAME), folder);
             banner_load(folder); RECT banner = {0, 0, sx(CLIENT_W), sx(BANNER_H)}; InvalidateRect(window, &banner, FALSE);
@@ -2093,12 +2217,17 @@ static int gui(HINSTANCE instance, const wchar_t *const *extra, int extra_count)
     /* ONLINE */
     y = 360 + 34;
     label(L"Online play", 28, y, 118); combo(150, y, 280, ID_MODE, 0); y += 30;
-    label(L"Join address", 28, y, 118); edit(settings.join_address, 150, y, 280, ID_ONLINE); y += 30;
-    label(L"Host address", 28, y, 118); combo(150, y, 280, ID_HOST, 1); y += 30;
+    join_label = label(L"Join address", 28, y, 118); edit(settings.join_address, 150, y, 280, ID_ONLINE);
+    edit(settings.shadnet_id, 150, y, 280, ID_SHADNET_ID); /* Overtime online: in Join address's place */
+    SendMessageW(control(ID_SHADNET_ID), EM_SETLIMITTEXT, 16, 0); y += 30;
+    host_label = label(L"Host address", 28, y, 118); combo(150, y, 280, ID_HOST, 1);
+    dark_theme(make(L"EDIT", settings.shadnet_password, WS_BORDER | ES_AUTOHSCROLL | ES_PASSWORD | WS_TABSTOP, 150, y, 280, 24,
+                    ID_SHADNET_PASSWORD), L"DarkMode_CFD");
+    SendMessageW(control(ID_SHADNET_PASSWORD), EM_SETLIMITTEXT, COUNT(settings.shadnet_password) - 1, 0); y += 30;
     button(L"Rescan", 150, y, 90, 24, ID_HOSTSCAN);
-    button(L"Copy IP", 246, y, 100, 24, ID_COPYHOST); y += 32;
-    note(L"Host: share this PC's address with your friend (Copy IP). Outside your LAN both PCs need a VPN: "
-         L"choose this PC's VPN IP. The server starts with Play and stops with the game.", 28, y, 402, 58);
+    button(L"Copy IP", 246, y, 100, 24, ID_COPYHOST);
+    button(L"Discord", 150, y, 90, 24, ID_DISCORD); y += 32; /* Overtime online: in Rescan's place */
+    online_note = note(host_note, 28, y, 402, 58);
     /* VIDEO (right column; content x 470..872) */
     y = 134 + 34;
     const struct { const wchar_t *text; int id; } video_rows[] = {

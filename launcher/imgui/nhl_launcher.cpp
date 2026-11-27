@@ -10,7 +10,7 @@
 // reports how it ended.
 //
 // Development: BB_LAUNCHER_SCREENSHOT=<file.bmp> draws a few frames, saves the last and quits
-// (BB_LAUNCHER_TAB=0..3 picks the tab), for checking the layout without a display
+// (BB_LAUNCHER_TAB=0..4 picks the tab), for checking the layout without a display
 // (SDL_VIDEO_DRIVER=offscreen); with BB_LAUNCHER_PLAY=1 it presses Play first and saves the frame
 // after the game start has ended.
 #include <SDL3/SDL.h>
@@ -28,6 +28,12 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#ifdef _WIN32
+#include <windows.h>
+#include <wincrypt.h>
+#else
+#include <sys/stat.h>
+#endif
 #include <utility>
 #include <vector>
 
@@ -213,15 +219,60 @@ const char* const kFpsLimits[] = {"60", "90", "120", "144", "240", "0"};
 const char* const kPresentNames[] = {"Mailbox", "VSync (FIFO)", "Immediate (may tear)"};
 const char* const kUpscalerNames[] = {"Off (bilinear)", "AMD FSR 1.0"};
 const char* const kSharpnessNames[] = {"Off", "Low", "Medium", "High"};
+// Online play (online_mode= in sacredfire.ini). NHL19.exe's window also has Join / Host server for a
+// LAN game; this launcher keeps such a choice until another one is picked here.
+const char* const kOnlineIds[] = {"offline", "overtime"};
+const char* const kOnlineNames[] = {"Offline", "Overtime online"};
+const char* const kOvertimeDiscord = "https://gg.puckpeak.com";
 template <size_t N> constexpr int Count(const char* const (&)[N]) { return int(N); }
 int IndexOf(const char* const* list, int count, const std::string& value, int fallback) {
     for (int i = 0; i < count; ++i) if (value == list[i]) return i;
     return fallback;
 }
 
+// The ShadNet password in sacredfire.ini. Windows: "dpapi:<hex>", encrypted for this Windows user
+// (the Windows launcher reads and writes the same); Linux: "plain:<text>" in a file only the user
+// reads (nhl19.sh passes it on). Anything else reads as no password.
+std::string PasswordToIni(const std::string& password) {
+    if (password.empty()) return "";
+#ifdef _WIN32
+    static const char digits[] = "0123456789abcdef";
+    DATA_BLOB in = {static_cast<DWORD>(password.size()), reinterpret_cast<BYTE*>(const_cast<char*>(password.data()))}, blob = {};
+    if (!CryptProtectData(&in, L"ShadNet password", nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &blob)) return "";
+    std::string out = "dpapi:";
+    for (DWORD i = 0; i < blob.cbData; ++i) { out += digits[blob.pbData[i] >> 4]; out += digits[blob.pbData[i] & 15]; }
+    LocalFree(blob.pbData);
+    return out;
+#else
+    return "plain:" + password;
+#endif
+}
+std::string PasswordFromIni(const std::string& value) {
+    if (value.rfind("plain:", 0) == 0) return value.substr(6);
+#ifdef _WIN32
+    if (value.rfind("dpapi:", 0) != 0 || value.size() % 2) return "";
+    std::string bytes;
+    for (size_t i = 6; i + 1 < value.size(); i += 2) {
+        const auto digit = [](char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1; };
+        const int hi = digit(value[i]), lo = digit(value[i + 1]);
+        if (hi < 0 || lo < 0) return "";
+        bytes += static_cast<char>(hi << 4 | lo);
+    }
+    DATA_BLOB in = {static_cast<DWORD>(bytes.size()), reinterpret_cast<BYTE*>(bytes.data())}, plain = {};
+    if (bytes.empty() || !CryptUnprotectData(&in, nullptr, nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &plain)) return "";
+    std::string out(reinterpret_cast<const char*>(plain.pbData), plain.cbData);
+    SecureZeroMemory(plain.pbData, plain.cbData);
+    LocalFree(plain.pbData);
+    return out;
+#else
+    return "";
+#endif
+}
+
 struct Settings {
-    std::string game, gamepad, log_dir;
+    std::string game, gamepad, log_dir, online_mode;
     char player[17] = "";
+    char shadnet_id[17] = "", shadnet_password[128] = "";  // Overtime online: the player's ShadNet account
     int language = 0, resolution = 1, display = 0, fps = 5, upscaler = 0, sharpness = 2;
 #ifdef _WIN32
     int present = 2;  // Immediate: the Windows launcher's default
@@ -234,7 +285,10 @@ struct Settings {
         game = ini.Get("game");
         gamepad = ini.Get("gamepad");
         log_dir = ini.Get("log_dir");
+        online_mode = ini.Get("online_mode");
         SDL_strlcpy(player, ini.Get("player").c_str(), sizeof player);
+        SDL_strlcpy(shadnet_id, ini.Get("shadnet_id").c_str(), sizeof shadnet_id);
+        SDL_strlcpy(shadnet_password, PasswordFromIni(ini.Get("shadnet_password")).c_str(), sizeof shadnet_password);
         language = IndexOf(kLanguageIds, Count(kLanguageIds), ini.Get("language"), 0);
         resolution = ini.GetInt("resolution", 1, Count(kResolutionNames));
         display = ini.GetInt("display", 0, Count(kDisplayNames));
@@ -265,6 +319,9 @@ struct Settings {
         ini.Set("frame_stats", frame_stats ? "1" : "0");
         ini.Set("validation", validation ? "1" : "0");
         ini.Set("log_dir", log_dir);
+        if (!online_mode.empty()) ini.Set("online_mode", online_mode);
+        ini.Set("shadnet_id", shadnet_id);
+        ini.Set("shadnet_password", PasswordToIni(shadnet_password));
     }
 };
 
@@ -409,6 +466,9 @@ public:
     void Save() {
         settings_.To(ini_);
         if (!ini_.Save()) Report("Settings couldn't be saved to " + ini_.path + ": " + SDL_GetError(), kBad);
+#ifndef _WIN32
+        else if (settings_.shadnet_password[0]) chmod(ini_.path.c_str(), 0600);  // the password: this user only
+#endif
     }
 
     ImFont* bold = nullptr;
@@ -601,7 +661,46 @@ private:
             ImGui::EndChild();
             ImGui::EndTabItem();
         }
-        if (tab("Advanced", 3)) {
+        if (tab("Online", 3)) {
+            ImGui::BeginChild("##online", ImVec2(0, -footer_h));
+            if (BeginRows("##onlinerows")) {
+                Row("Online play");
+                const bool lan = settings_.online_mode == "join" || settings_.online_mode == "host";
+                const int mode = IndexOf(kOnlineIds, Count(kOnlineIds), settings_.online_mode, 0);
+                if (ImGui::BeginCombo("##online", lan ? "Join / Host server (set in NHL19.exe)" : kOnlineNames[mode])) {
+                    for (int i = 0; i < Count(kOnlineNames); ++i) {
+                        if (ImGui::Selectable(kOnlineNames[i], !lan && i == mode)) { settings_.online_mode = kOnlineIds[i]; changed = true; }
+                        if (!lan && i == mode) ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
+                }
+                Note("Overtime online: Online Versus in the game, against Overtime players (shadPS4 and this port) "
+                     "on Puck Peak's servers.");
+                Row("ShadNet ID");
+                if (ImGui::InputText("##shadnetid", settings_.shadnet_id, sizeof settings_.shadnet_id,
+                                     ImGuiInputTextFlags_CharsNoBlank))
+                    changed = true;
+                Row("Password");
+                if (ImGui::InputText("##shadnetpassword", settings_.shadnet_password, sizeof settings_.shadnet_password,
+                                     ImGuiInputTextFlags_Password))
+                    changed = true;
+#ifdef _WIN32
+                Note("Your ShadNet account, the one shadPS4 uses: Overtime online signs in with it. The password is "
+                     "kept encrypted for your Windows user.");
+#else
+                Note("Your ShadNet account, the one shadPS4 uses: Overtime online signs in with it. The password is "
+                     "kept in the settings file, readable by your user only.");
+#endif
+                Row("Community");
+                if (ImGui::Button("Discord: gg.puckpeak.com") && !SDL_OpenURL(kOvertimeDiscord))
+                    Report(std::string("Couldn't open ") + kOvertimeDiscord + ": " + SDL_GetError(), kBad);
+                Note("Opponents, match times and help.");
+                ImGui::EndTable();
+            }
+            ImGui::EndChild();
+            ImGui::EndTabItem();
+        }
+        if (tab("Advanced", 4)) {
             ImGui::BeginChild("##advanced", ImVec2(0, -footer_h));
             if (BeginRows("##advrows")) {
                 Row("Clear the shader cache");
