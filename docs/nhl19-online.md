@@ -144,6 +144,26 @@ grep -n "tokeninfo -> 200" out/run.txt          # the line to read from
   tags tools/ufc3_auth.py already answers.
 - Then matchmaking (Online Versus first), peer-to-peer (`src/runtime_net_p2p.h`) and determinism
   between two PCs, and the launcher's Host / Join.
-- Overtime (github.com/MatusRiedl/nhl19-pc-online-overtime) runs a community server for shadPS4
-  players; connecting this port to it would need their permission, HTTPS in sceHttp and a
-  ShadNet sign-in. Their game-fix patches are in `patches/NHL19-Overtime.xml`.
+
+## Overtime online
+
+The launcher's "Overtime online" mode plays the game's own Online Versus on Overtime's community
+servers (github.com/MatusRiedl/nhl19-pc-online-overtime), against their shadPS4 players and other
+copies of this port. `BB_ONLINE_PROFILE=overtime` from a .bat or nhl19.conf does the same.
+
+- Account: the player's own ShadNet account (shadPS4's PSN service, srv.shadps4.net), the one
+  they use in shadPS4. The launcher's ShadNet ID and password go to the game as `BB_SHADNET_ID`
+  and `BB_SHADNET_PASSWORD`; src/runtime_shadnet.c signs in once at start-up and asks ShadNet for
+  the authorization codes, as shadPS4 does (account id = ShadNet's, online id = the ShadNet ID).
+  Without an account, or when ShadNet refuses it, the game is signed out of PSN and the log says
+  why. sacredfire.ini keeps the password encrypted for the Windows user (DPAPI); on Linux it is
+  in the settings file, readable by the user only. The password is never written to a log.
+  `BB_SHADNET_SERVER` (host[:port]) names another ShadNet server, for tests.
+- Server: `ot.puckpeak.com` (`BB_OVERTIME_HOST` names a test server); names through this PC's
+  DNS, https:// over TLS (src/runtime_tls.c).
+- Patches: `patches/NHL19-Overtime.xml` + `NHL19-Overtime-Online.xml`, the set Overtime's
+  players have; patches.py writes its netplay fingerprint to the log.
+- Floating point: shadPS4's rcp/rsqrt rule (native on AMD, AMD's tables elsewhere), so a match
+  against an AMD PC on shadPS4 stays in step.
+- Tests: `ninja overtime-net-test` then `python3 -m pytest tests/test_overtime_net.py` (a fake
+  ShadNet and HTTPS server on 127.0.0.1, test values only).

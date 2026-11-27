@@ -25,6 +25,7 @@ int platform_sleep_ns(uint64_t ns) {
     return nanosleep(&t, NULL);
 }
 void runtime_thread_attach_host(const char *name) { (void)name; }
+const char *runtime_file_user_dir(void) { return "."; } /* Overtime online only */
 /* Stack scanning is only an opt-in diagnostic in the full runtime; this ABI test never enables it. */
 uintptr_t platform_thread_stack_top(void) { return 0; }
 uint64_t platform_monotonic_ns(void) {

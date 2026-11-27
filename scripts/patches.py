@@ -14,9 +14,19 @@ Patch files: patches/*.xml in the checkout (patches/CrashTeamRacing.xml, from
 illusionyy/PS-Game-Patch) and any folder named with --patches-dir. A patch is applied when the
 in-game menu or the launcher turned its bbport.ini key on (GAME_PATCH_KEYS), when patches.json
 lists it under "enabled", or when its file marks it isEnabled and patches.json does not disable it.
+
+Overtime online (--profile overtime, or BB_ONLINE_PROFILE=overtime): the patch set Puck Peak Overtime's
+players run (OVERTIME_ONLINE_PATCHES) is applied whole, or nothing starts: a missing or failing patch
+is an error, not a skipped patch. Of the launcher's own choices only patches that stay on this PC
+(OVERTIME_LOCAL_ONLY, e.g. the picture size) are kept. --overtime-host (BB_OVERTIME_HOST) writes
+another server into the host slots (a dev server for tests).
+Every run writes out/netplay_fingerprint.txt: Overtime's netplay fingerprint of the applied patches,
+which the Overtime online sign-in carries (games with different fingerprints simulate different code).
 """
 import argparse
+import hashlib
 import json
+import os
 import re
 import struct
 import sys
@@ -33,6 +43,41 @@ GAME_PATCH_KEYS={'patch_60fps':'CrashTeamRacing.xml/60 FPS Unlock',
                  'patch_no_motion_blur':'CrashTeamRacing.xml/Disable Motion Blur',
                  'patch_pro_1080p':'CrashTeamRacing.xml/Resolution Patch (1080p for PS4 Pro)'}
 
+# Overtime online: the patches Overtime 1.00.0 turns on (its patches/overtime_lan.xml), from
+# NHL19-Overtime.xml and NHL19-Overtime-Online.xml, and the fingerprint they make.
+OVERTIME_ONLINE_PATCHES=(
+    'NHL19-Overtime.xml/R1: cap check on the Franchise per-team list append',
+    'NHL19-Overtime.xml/60 FPS replays (Kravickas)',
+    'NHL19-Overtime.xml/E32: 32 teams in every mode',
+    'NHL19-Overtime.xml/BAP32: Seattle in Be a Pro',
+    'NHL19-Overtime-Online.xml/ProtoHttp: accept EAGAIN while waiting for the status code',
+    'NHL19-Overtime-Online.xml/Redirector host: ot.puckpeak.com',
+    'NHL19-Overtime-Online.xml/QoS coordinator: skip TLS cert validation',
+    'NHL19-Overtime-Online.xml/Nucleus hosts: ot.puckpeak.com, 91.98.195.150',
+    'NHL19-Overtime-Online.xml/T1: not-found check on the Threes unlock lookup',
+    'NHL19-Overtime-Online.xml/Cross-vendor exact math (rcp/rsqrt)',
+    'NHL19-Overtime-Online.xml/WoC: every customization item unlocked',
+    'NHL19-Overtime-Online.xml/WoC: every attribute of a created player at 99',
+    'NHL19-Overtime-Online.xml/Ones: two players can start a match',
+    'NHL19-Overtime-Online.xml/C32: 32 clubs in Classic Franchise and Season')
+OVERTIME_ONLINE_FINGERPRINT='bf29376fd641daf7f61b'
+# Overtime's netplay fingerprint (overtime_core/xmlpatch.py netplay_fingerprint, MIT): sha256 of the
+# sorted "ADDRESS=VALUE" lines (both upper case, as written in the file) of every applied patch, without
+# the patches that stay on one PC (OVERTIME_LOCAL_ONLY, by name) and the host slots (any server name
+# plays the same game); the first 20 hex digits.
+OVERTIME_LOCAL_ONLY=('Resolution 2560x1440 (Kravickas)','Resolution 1280x720 (Kravickas)',
+                     'Resolution 3840x2160 (Kravickas)','Resolution 5120x2880 (Kravickas)',
+                     'Resolution 7680x4320 (Kravickas)','Compute features off (Kravickas)',
+                     '60 FPS replays (Kravickas)','BAP32: Seattle in Be a Pro',
+                     'T1: not-found check on the Threes unlock lookup','WoC: every customization item unlocked',
+                     'Ones: two players can start a match','C32: 32 clubs in Classic Franchise and Season')
+# NHL 19 1.60 host strings (address -> characters it holds before the NUL): the Blaze redirector
+# host, then the Nucleus accounts, gateway and sign-in base URLs.
+OVERTIME_REDIRECTOR_SLOT=('0x51DCCFF',29)
+OVERTIME_NUCLEUS_SLOTS=(('0x526E089',24),('0x526E0A2',23),('0x526E0BA',22))
+OVERTIME_HOST_RE=re.compile(r'^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$')
+OVERTIME_URL_RE=re.compile(r'^https?://([A-Za-z0-9.-]+)(?::\d+)?/$')
+
 
 def read_settings(path):
     """bbport.ini as a dict (key=value lines; # comments)."""
@@ -45,13 +90,22 @@ def read_settings(path):
 
 
 def eboot_segments(elf):
-    """(start, end) of eboot.elf's load segments: patches must land inside one."""
+    """(start, end) of eboot.elf's load segments: patches must land inside one. An executable segment
+    ends where the loader maps it (prepare.py mapped_size): its last 16 KiB page, where patches put
+    code caves."""
     phoff,=struct.unpack_from('<Q',elf,0x20)
     phentsize,phnum=struct.unpack_from('<HH',elf,0x36)
-    segments=[]
+    loads=[]
     for i in range(phnum):
-        kind,_,_,vaddr,_,_,memsz,_=struct.unpack_from('<IIQQQQQQ',elf,phoff+i*phentsize)
-        if kind==1: segments.append((vaddr,vaddr+memsz))
+        kind,flags,_,vaddr,_,_,memsz,_=struct.unpack_from('<IIQQQQQQ',elf,phoff+i*phentsize)
+        if kind in (1,0x61000010): loads.append((kind,flags,vaddr,vaddr+memsz))
+    size=max((end for _,_,_,end in loads),default=0)
+    segments=[]
+    for kind,flags,vaddr,end in loads:
+        if kind!=1: continue
+        if flags&1:
+            end=min([(end+0x3fff)&~0x3fff,size]+[start for _,_,start,_ in loads if start>=end and start!=vaddr])
+        segments.append((vaddr,end))
     return segments
 
 
@@ -136,9 +190,57 @@ def external_selection(found, config, ini=None):
             if key in enabled or (key not in disabled and meta.get('isEnabled','false').lower()=='true')]
 
 
-def compile_external(selected, segments, elf=None):
-    """Writes of the selected patches; a patch with unsupported lines is skipped whole. elf (the
-    eboot.elf bytes) is needed for lines with a Signature."""
+def overtime_selection(found, config, ini=None):
+    """The Overtime online set: every OVERTIME_ONLINE_PATCHES patch, plus the launcher's own choices
+    (external_selection) that stay on this PC. A missing patch is a ValueError."""
+    keys={key for key,_,_ in found}
+    missing=[key for key in OVERTIME_ONLINE_PATCHES if key not in keys]
+    if missing: raise ValueError('Overtime online patches missing: '+', '.join(missing))
+    chosen={key for key,_,_ in external_selection(found,config,ini)}
+    selected=[]
+    for key,path,meta in found:
+        if key in OVERTIME_ONLINE_PATCHES: selected.append((key,path,meta))
+        elif key in chosen:
+            if meta.get('Name') in OVERTIME_LOCAL_ONLY: selected.append((key,path,meta))
+            else: print(f'Patches: Overtime online leaves out {key} (Overtime players do not run it)',file=sys.stderr)
+    return selected
+
+
+def netplay_fingerprint(selected):
+    """Overtime's netplay fingerprint of the selected patches (see OVERTIME_LOCAL_ONLY)."""
+    skip={OVERTIME_REDIRECTOR_SLOT[0].upper()}|{addr.upper() for addr,_ in OVERTIME_NUCLEUS_SLOTS}
+    lines=sorted(f'{line.get("Address","").upper()}={(line.get("Value") or "").upper()}'
+                 for _,_,meta in selected if meta.get('Name') not in OVERTIME_LOCAL_ONLY
+                 for line in meta.iter('Line') if line.get('Address','').upper() not in skip)
+    return hashlib.sha256('\n'.join(lines).encode('ascii')).hexdigest()[:20]
+
+
+def set_overtime_host(selected, host, nucleus_url=None):
+    """Writes host into the selected patches' host slots: the redirector slot gets host, each Nucleus
+    slot https://<host>/ where it fits and nucleus_url where it does not. ValueError when a name is
+    not a host, or a slot is too small."""
+    if not OVERTIME_HOST_RE.match(host or '') or '--' in host:
+        raise ValueError(f'not a host name or address: {host!r}')
+    if nucleus_url and not OVERTIME_URL_RE.match(nucleus_url):
+        raise ValueError(f'not a base URL (https://host[:port]/): {nucleus_url!r}')
+    texts={OVERTIME_REDIRECTOR_SLOT[0].upper():(host,OVERTIME_REDIRECTOR_SLOT[1])}
+    for addr,room in OVERTIME_NUCLEUS_SLOTS:
+        url=f'https://{host}/'
+        texts[addr.upper()]=(url if len(url)<=room or not nucleus_url else nucleus_url,room)
+    for _,_,meta in selected:
+        for line in meta.iter('Line'):
+            slot=texts.get(line.get('Address','').upper())
+            if not slot: continue
+            text,room=slot
+            if len(text)>room:
+                raise ValueError(f'{text!r} is {len(text)} characters; the slot at {line.get("Address")} holds {room}'
+                                 ' (give a shorter base URL with --overtime-nucleus-url)')
+            line.set('Value',(text.encode('ascii')+b'\0').hex().upper())
+
+
+def compile_external(selected, segments, elf=None, strict=False):
+    """Writes of the selected patches; a patch with unsupported lines is skipped whole (strict: a
+    ValueError instead). elf (the eboot.elf bytes) is needed for lines with a Signature."""
     writes=[]
     for key,_,meta in selected:
         try:
@@ -155,6 +257,7 @@ def compile_external(selected, segments, elf=None):
                     raise ValueError(f'address {line.get("Address")} is outside the eboot')
                 ours.append((offset,data))
         except ValueError as error:
+            if strict: raise ValueError(f'{key}: {error}') from None
             print(f'Patches: skipped {key}: {error}',file=sys.stderr)
             continue
         writes+=ours
@@ -180,12 +283,37 @@ def main():
     p.add_argument('--out',type=Path,default=root/'out')
     p.add_argument('--settings',type=Path,default=root/'bbport.ini')
     p.add_argument('--external-only',action='store_true',help='accepted for older callers (the only mode)')
+    p.add_argument('--profile',default=os.environ.get('BB_ONLINE_PROFILE') or 'default',
+                   help='overtime: the Overtime online patch set (default: BB_ONLINE_PROFILE)')
+    p.add_argument('--overtime-host',default=os.environ.get('BB_OVERTIME_HOST') or None,
+                   help='Overtime online: server name or address for the host slots (default: BB_OVERTIME_HOST)')
+    p.add_argument('--overtime-nucleus-url',default=os.environ.get('BB_OVERTIME_NUCLEUS_URL') or None,
+                   help='Overtime online: base URL for Nucleus slots too small for https://<host>/')
     a=p.parse_args()
+    if a.profile not in ('default','overtime'): p.error(f'unknown profile {a.profile!r} (default, overtime)')
     elf=(a.out/'eboot.elf').read_bytes()
     segments=eboot_segments(elf)
     found=external_patches(a.patches_dir,a.app_version,a.title_id)
-    writes=compile_external(external_selection(found,a.patches_config,read_settings(a.settings)),segments,elf)
+    ini=read_settings(a.settings)
+    (a.out/'patches.bin').unlink(missing_ok=True)
+    (a.out/'netplay_fingerprint.txt').unlink(missing_ok=True)
+    if a.profile=='overtime':
+        try:
+            selected=overtime_selection(found,a.patches_config,ini)
+            fingerprint=netplay_fingerprint(selected)
+            if fingerprint!=OVERTIME_ONLINE_FINGERPRINT:
+                raise ValueError(f'netplay fingerprint {fingerprint}, Overtime players have {OVERTIME_ONLINE_FINGERPRINT}')
+            if a.overtime_host: set_overtime_host(selected,a.overtime_host,a.overtime_nucleus_url)
+            writes=compile_external(selected,segments,elf,strict=True)
+        except ValueError as error:
+            sys.exit(f'Patches: Overtime online: {error}')
+        print(f'Patches: Overtime online, fingerprint {fingerprint}'+(f', server {a.overtime_host}' if a.overtime_host else ''))
+    else:
+        selected=external_selection(found,a.patches_config,ini)
+        writes=compile_external(selected,segments,elf)
+        fingerprint=netplay_fingerprint(selected)
     write_blob(a.out,writes)
+    (a.out/'netplay_fingerprint.txt').write_text(fingerprint+'\n')
     print(f'Patches: {len(writes)} writes from {len(found)} available patches')
 
 

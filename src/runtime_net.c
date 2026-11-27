@@ -8,7 +8,16 @@
  * egress is not filtered yet. The game's HTTP requests (sceHttp) go to the same server in plain
  * HTTP. PSN web APIs (friends, invitations) stay unavailable.
  *
- * BB_NET_LOG=1 (default on in this mode): every call, for working out the online flow. */
+ * BB_NET_LOG=1 (default on in this mode): every call, for working out the online flow.
+ *
+ * NHL 19 "Overtime online" (BB_ONLINE_PROFILE=overtime): the Puck Peak Overtime servers
+ * (ot.puckpeak.com, or BB_OVERTIME_HOST), where the game plays shadPS4 players too. Names go to
+ * the host's DNS as on shadPS4, sockets keep the game's ports, sceHttp speaks TLS for https://
+ * (runtime_tls.c), and the PSN account is the player's own ShadNet account (runtime_shadnet.c),
+ * as on shadPS4: ShadNet's account id, the ShadNet ID as the online id, and ShadNet's
+ * authorization codes. BB_SHADNET_ID and BB_SHADNET_PASSWORD (from the launcher; BB_SHADNET_TOKEN,
+ * BB_SHADNET_SERVER) sign in once at start-up; without them, or when ShadNet refuses, the game is
+ * signed out of PSN and says so. */
 #define _GNU_SOURCE
 #include "runtime.h"
 #include <ctype.h>
@@ -50,6 +59,10 @@ static char server_host[256];
 static uint32_t server_addr; /* network order */
 static int net_log;
 static uint64_t net_trace_size;
+static int overtime; /* BB_ONLINE_PROFILE=overtime */
+#define OVERTIME_HOST "ot.puckpeak.com"
+#define SHADNET_SERVER "srv.shadps4.net:31313" /* shadPS4's default */
+static void shadnet_start(void);
 #ifndef _WIN32
 /* BB_MEMGREP=text:file: while the game runs, creating "<file>.go" makes it search all of its
  * readable memory for <text> and save 16 KiB around each hit to <file> (then "<file>.go" is
@@ -118,7 +131,12 @@ static void configure(void) {
 #ifndef _WIN32
     if (getenv("BB_MEMGREP")) { pthread_t t; pthread_create(&t, NULL, memgrep_thread, NULL); pthread_detach(t); }
 #endif
-    const char *server = getenv("BB_ONLINE_SERVER");
+    const char *server = getenv("BB_ONLINE_SERVER"), *profile = getenv("BB_ONLINE_PROFILE");
+    overtime = profile && !strcmp(profile, "overtime");
+    if (overtime) {
+        const char *host = getenv("BB_OVERTIME_HOST");
+        server = host && *host ? host : OVERTIME_HOST;
+    }
     online = server && *server;
     if (!online) return;
     snprintf(server_host, sizeof server_host, "%s", server);
@@ -142,9 +160,15 @@ static void configure(void) {
     net_trace_size = trace && *trace ? strtoull(trace, NULL, 0) : 0;
     char text[INET_ADDRSTRLEN] = "?";
     inet_ntop(AF_INET, &server_addr, text, sizeof text);
-    printf("Online: server %s (%s); PSN simulated (signed in, PS Plus); only *.ea.com is resolved\n",
-           server_host, text);
+    if (overtime) {
+        printf("Online: Overtime online, server %s (%s); names through this PC's DNS, TLS for https://\n",
+               server_host, text);
+        shadnet_start();
+    } else
+        printf("Online: server %s (%s); PSN simulated (signed in, PS Plus); only *.ea.com is resolved\n",
+               server_host, text);
 }
+int runtime_net_overtime(void) { configure(); return online && overtime; }
 #define LOG(...) do { if (net_log) { printf("Net: " __VA_ARGS__); putchar('\n'); } } while (0)
 
 /* ---- PS4 network errors: 0x80410100 | errno (BSD numbers), errno also in sceNetErrnoLoc ---- */
@@ -213,9 +237,10 @@ static const char *addr_text(const void *ps) {
     return text;
 }
 
-/* The server runs as a normal user: ports below 1024 on it (443, 80) are reached at +40000. */
+/* The server runs as a normal user: ports below 1024 on it (443, 80) are reached at +40000.
+ * Overtime's servers listen on the game's own ports. */
 static void remap_port(struct sockaddr_in *h) {
-    if (h->sin_addr.s_addr == server_addr && ntohs(h->sin_port) < 1024)
+    if (!overtime && h->sin_addr.s_addr == server_addr && ntohs(h->sin_port) < 1024)
         h->sin_port = htons((uint16_t)(ntohs(h->sin_port) + 40000));
 }
 #include "runtime_net_p2p.h"
@@ -645,6 +670,21 @@ static ABI int32_t resolver_ntoa(int id, const char *host, uint32_t *addr, int t
     if (!host || !addr) return fail(22);
     struct in_addr literal;
     if (inet_pton(AF_INET, host, &literal) == 1) { *addr = literal.s_addr; return 0; }
+    if (overtime) { /* every name through this PC's DNS, as on shadPS4 */
+        struct addrinfo hints = {.ai_family = AF_INET, .ai_socktype = SOCK_STREAM}, *res = NULL;
+        if (getaddrinfo(host, NULL, &hints, &res) == 0 && res) {
+            *addr = ((struct sockaddr_in *)res->ai_addr)->sin_addr.s_addr;
+            freeaddrinfo(res);
+            char text[INET_ADDRSTRLEN] = "?";
+            inet_ntop(AF_INET, addr, text, sizeof text);
+            LOG("resolve %s -> %s", host, text);
+            return 0;
+        }
+        LOG("resolve %s -> not found", host);
+        resolver_error = (int32_t)0x804101e2; /* RESOLVER_ENODNS */
+        net_errno_value = 0xe2;
+        return resolver_error;
+    }
     if (ends_with(host, ".ea.com") || ends_with(host, ".ea.net") || !strcmp(host, server_host)) {
         *addr = server_addr;
         LOG("resolve %s -> online server", host);
@@ -744,23 +784,99 @@ static const char *player_name(void) {
     const char *n = getenv("BB_USER_NAME");
     return n && *n ? n : "Player 1";
 }
+/* Overtime online: the player's ShadNet account, signed in once on a thread started by configure();
+ * the PSN calls wait for that sign-in (pthread_once). An id longer than an online id (16) is refused. */
+static pthread_once_t shadnet_once = PTHREAD_ONCE_INIT;
+static int shadnet_ok;
+static uint64_t shadnet_account;
+static char shadnet_id[17], shadnet_reason[256];
+static int shadnet_login(void) {
+    const char *id = getenv("BB_SHADNET_ID"), *password = getenv("BB_SHADNET_PASSWORD");
+    const char *token = getenv("BB_SHADNET_TOKEN"), *server = getenv("BB_SHADNET_SERVER");
+    if (!server || !*server) server = SHADNET_SERVER;
+    uint64_t account = 0;
+    if (!id || !*id || !password || !*password)
+        snprintf(shadnet_reason, sizeof shadnet_reason, "no ShadNet account given: enter your ShadNet ID and password in the launcher");
+    else if (strlen(id) > 16)
+        snprintf(shadnet_reason, sizeof shadnet_reason, "a ShadNet ID has at most 16 characters");
+    else if (runtime_shadnet_sign_in(server, id, password, token, "CUSA11126", "NHL\xe2\x84\xa2 19", &account,
+                                     shadnet_reason, sizeof shadnet_reason)) {
+        if (shadnet_account && account != shadnet_account) {
+            snprintf(shadnet_reason, sizeof shadnet_reason, "ShadNet answered with another account (%llu, was %llu)",
+                     (unsigned long long)account, (unsigned long long)shadnet_account);
+            runtime_shadnet_close();
+            return 0;
+        }
+        shadnet_account = account;
+        snprintf(shadnet_id, sizeof shadnet_id, "%s", id);
+        return 1;
+    }
+    return 0;
+}
+static void shadnet_sign_in(void) {
+    const char *server = getenv("BB_SHADNET_SERVER");
+    printf("Online: signing in to ShadNet (%s)%s%s\n", server && *server ? server : SHADNET_SERVER,
+           getenv("BB_SHADNET_ID") ? " as " : "", getenv("BB_SHADNET_ID") ? getenv("BB_SHADNET_ID") : "");
+    shadnet_ok = shadnet_login();
+    if (shadnet_ok) printf("Online: signed in to ShadNet as %s (account %llu)\n", shadnet_id, (unsigned long long)shadnet_account);
+    else printf("Online: not signed in to ShadNet: %s. The game stays signed out of PSN (Overtime online needs a ShadNet "
+                "account, the same one shadPS4 uses).\n", shadnet_reason);
+}
+static void *shadnet_thread(void *arg) { (void)arg; pthread_once(&shadnet_once, shadnet_sign_in); return NULL; }
+static void shadnet_start(void) {
+    pthread_t t;
+    if (pthread_create(&t, NULL, shadnet_thread, NULL) == 0) pthread_detach(t);
+}
+static int shadnet_signed_in(void) {
+    pthread_once(&shadnet_once, shadnet_sign_in);
+    return __atomic_load_n(&shadnet_ok, __ATOMIC_ACQUIRE) && !runtime_shadnet_refused();
+}
+/* Signs in again after a lost connection, one caller at a time. */
+static pthread_mutex_t shadnet_relogin = PTHREAD_MUTEX_INITIALIZER;
+static int shadnet_reconnect(void) {
+    pthread_mutex_lock(&shadnet_relogin);
+    int ok = runtime_shadnet_connected();
+    if (!ok) {
+        printf("Online: ShadNet connection lost: signing in again\n");
+        ok = shadnet_login();
+        if (!ok) printf("Online: ShadNet sign-in again failed: %s\n", shadnet_reason);
+    }
+    pthread_mutex_unlock(&shadnet_relogin);
+    return ok;
+}
 static uint64_t account_id(void) {
+    if (overtime) return shadnet_signed_in() ? shadnet_account : 0;
     uint64_t h = 1469598103934665603ull;
     for (const char *p = player_name(); *p; ++p) h = (h ^ (unsigned char)*p) * 1099511628211ull;
     return h & 0x7fffffffffffffffull;
 }
+/* The online id the game shows: the ShadNet ID in Overtime online, else the player name. */
+static const char *own_name(void) { return overtime && shadnet_signed_in() ? shadnet_id : player_name(); }
 static void online_id(char *out20) { /* {char data[16]; s8 term; s8 dummy[3]} */
     memset(out20, 0, 20);
     char clean[17]; int n = 0;
-    for (const char *p = player_name(); *p && n < 16; ++p)
+    for (const char *p = own_name(); *p && n < 16; ++p)
         clean[n++] = isalnum((unsigned char)*p) || *p == '-' || *p == '_' ? *p : '_';
     clean[n] = 0;
     memcpy(out20, clean, (size_t)n);
 }
+#define NP_SIGNED_OUT ((int32_t)0x80550006)
+#define NP_INVALID_ARGUMENT ((int32_t)0x80550003)
 static int32_t next_request = 0x20000001;
-static ABI int32_t np_state(int32_t user, uint32_t *state) { (void)user; if (state) *state = 2; return 0; }
-static ABI int32_t np_online_id(int32_t user, char *id) { (void)user; if (!id) return (int32_t)0x80550003; online_id(id); return 0; }
-static ABI int32_t np_np_id(int32_t user, char *id) { (void)user; if (!id) return (int32_t)0x80550003; memset(id, 0, 36); online_id(id); return 0; }
+static int signed_out(void) { return overtime && !shadnet_signed_in(); }
+static ABI int32_t np_state(int32_t user, uint32_t *state) { (void)user; if (state) *state = signed_out() ? 1 : 2; return 0; }
+static ABI int32_t np_online_id(int32_t user, char *id) {
+    (void)user;
+    if (!id) return NP_INVALID_ARGUMENT;
+    if (signed_out()) return NP_SIGNED_OUT;
+    online_id(id); return 0;
+}
+static ABI int32_t np_np_id(int32_t user, char *id) {
+    (void)user;
+    if (!id) return NP_INVALID_ARGUMENT;
+    if (signed_out()) return NP_SIGNED_OUT;
+    memset(id, 0, 36); online_id(id); return 0;
+}
 typedef void (ABI *NpStateCallbackA)(int32_t user, int32_t state, void *arg);
 typedef void (ABI *NpStateCallback)(int32_t user, int32_t state, const void *np_id, void *arg);
 static void *np_state_cb; static void *np_state_cb_arg; static int np_state_cb_a, np_state_cb_done;
@@ -777,7 +893,7 @@ static ABI int32_t np_register_state(void *cb, void *arg) {
 static ABI int32_t np_unregister_state(int32_t id) { (void)id; np_state_cb = NULL; return 0; }
 static ABI int32_t np_check_callback(void) {
     void *cb = np_state_cb;
-    if (cb && !__atomic_exchange_n(&np_state_cb_done, 1, __ATOMIC_ACQ_REL)) {
+    if (cb && !signed_out() && !__atomic_exchange_n(&np_state_cb_done, 1, __ATOMIC_ACQ_REL)) {
         LOG("PSN: state callback told: user 1 signed in (state 2)");
         if (np_state_cb_a) ((NpStateCallbackA)cb)(1, 2, np_state_cb_arg);
         else {
@@ -787,7 +903,11 @@ static ABI int32_t np_check_callback(void) {
     }
     return 0;
 }
-static ABI int32_t np_account_id(int32_t user, uint64_t *id) { (void)user; if (id) *id = account_id(); return 0; }
+static ABI int32_t np_account_id(int32_t user, uint64_t *id) {
+    (void)user;
+    if (id) *id = account_id();
+    return signed_out() ? NP_SIGNED_OUT : 0;
+}
 static ABI int32_t np_country(int32_t user, char *code) { (void)user; if (code) { code[0] = 'u'; code[1] = 's'; code[2] = 0; code[3] = 0; } return 0; }
 static ABI int32_t np_request(const void *param) {
     (void)param;
@@ -820,11 +940,46 @@ static ABI int32_t np_parental(int32_t req, int32_t user, int8_t *age, uint8_t *
     return 0;
 }
 static ABI int32_t np_availability(int32_t req, int32_t user) { (void)req; (void)user; LOG("PSN: availability -> ok"); return 0; }
+/* sceNpAuthGetAuthorizationCode(A): {u64 size; online id pointer or user id; const char client_id[136]*;
+ * const char *scope}. Overtime online asks ShadNet for the code, with the game's own client id and
+ * scope, as shadPS4 does; a lost connection signs in again, and a call the drop cut off is sent once more. */
 static ABI int32_t np_auth_code(int32_t req, const void *param, char *code, int32_t *issuer) {
-    (void)req; (void)param;
-    if (code) { memset(code, 0, 136); snprintf(code, 129, "UFC3NATIVE-%016llx", (unsigned long long)account_id()); }
+    (void)req;
+    if (code) memset(code, 0, 136);
+    if (!overtime) {
+        if (code) snprintf(code, 129, "UFC3NATIVE-%016llx", (unsigned long long)account_id());
+        if (issuer) *issuer = 256;
+        LOG("PSN: authorization code for %s", player_name());
+        return 0;
+    }
+    if (!param || !code) return (int32_t)0x80550301; /* NP_AUTH_ERROR_INVALID_ARGUMENT */
+    if (!shadnet_signed_in()) { LOG("PSN: authorization code refused: not signed in to ShadNet"); return NP_SIGNED_OUT; }
+    const char *const *fields = (const char *const *)((const uint8_t *)param + 16);
+    char client_id[130] = "";
+    if (fields[0]) snprintf(client_id, sizeof client_id, "%.129s", fields[0]);
+    const char *scope = fields[1] ? fields[1] : "";
+    if (!shadnet_reconnect()) return NP_SIGNED_OUT;
+    char error[256] = "";
+    int shadnet_error = -1;
+    int ok = runtime_shadnet_auth_code(client_id, scope, code, 129, &shadnet_error, error, sizeof error);
+    if (!ok && shadnet_error == -1 && !runtime_shadnet_connected() && shadnet_reconnect()) /* dropped during the call */
+        ok = runtime_shadnet_auth_code(client_id, scope, code, 129, &shadnet_error, error, sizeof error);
+    if (!ok) {
+        memset(code, 0, 136);
+        printf("Online: no authorization code from ShadNet (client %s): %s\n", client_id, error);
+        if (shadnet_error == -3) { /* ShadNet signed this client out: no new sign-in this session */
+            __atomic_store_n(&shadnet_ok, 0, __ATOMIC_RELEASE);
+            printf("Online: ShadNet refused this client; the game is signed out of PSN until it restarts\n");
+            return NP_SIGNED_OUT;
+        }
+        return shadnet_error == 23 ? NP_SIGNED_OUT                      /* Unauthorized */
+             : shadnet_error == 4 ? (int32_t)0x80550402                 /* TooSoon: SERVICE_BUSY */
+             : shadnet_error == 3 ? (int32_t)0x80550301                 /* InvalidInput: INVALID_ARGUMENT */
+             : shadnet_error == -2 ? (int32_t)0x80550308                /* NO_TOKEN_RECEIVED */
+             : (int32_t)0x80550401;                                     /* SERVICE_DOWN */
+    }
     if (issuer) *issuer = 256;
-    LOG("PSN: authorization code for %s", player_name());
+    LOG("PSN: authorization code from ShadNet for %s (client %s, scope %s)", shadnet_id, client_id, scope);
     return 0;
 }
 /* The same answer, logged: which PSN web API the game wanted (sceNpWebApiCreateRequest:
@@ -879,7 +1034,7 @@ static void profile_json(char *out, size_t cap, const char *ids) {
         if (*p == ',') ++p;
         if (!k) break;
         unsigned long long id = strtoull(tok, NULL, 10);
-        const char *name = id == account_id() ? player_name() : peer_name();
+        const char *name = id == account_id() ? own_name() : peer_name();
         n += (size_t)snprintf(out + n, cap - n,
             "%s{\"accountId\":\"%s\",\"onlineId\":\"%s\",\"personalDetail\":{\"displayName\":\"%s\"},"
             "\"avatarUrls\":[{\"size\":\"s\",\"avatarUrl\":\"https://accounts.ea.com/psn-avatar/%s/s.png\"},"
@@ -1072,9 +1227,43 @@ static int http_send_all(HostSocket s, const void *data, uint64_t size) {
     }
     return 0;
 }
+/* One HTTP exchange: plain, or TLS (Overtime online, https://). */
+typedef struct { HostSocket s; RuntimeTls *tls; } HttpLink;
+static int link_send(HttpLink *l, const void *data, uint64_t size) {
+    return l->tls ? runtime_tls_write(l->tls, data, (size_t)size) : http_send_all(l->s, data, size);
+}
+static long link_recv(HttpLink *l, void *data, size_t size) {
+    return l->tls ? runtime_tls_read(l->tls, data, size) : (long)recv(l->s, data, (int)size, 0);
+}
+static void link_close(HttpLink *l) {
+    if (l->tls) runtime_tls_close(l->tls);
+    close_socket(l->s);
+}
+/* Overtime online: the game's own headers, without the ones this request sets itself. */
+static size_t game_headers(const char *headers, char *out, size_t cap) {
+    static const char *const own[] = {"Host:", "Content-Length:", "Connection:"};
+    size_t n = 0; out[0] = 0;
+    for (const char *line = headers; *line;) {
+        const char *end = strstr(line, "\r\n");
+        const size_t len = end ? (size_t)(end - line) + 2 : strlen(line);
+        int skip = 0;
+        for (size_t i = 0; i < sizeof own / sizeof *own; ++i)
+            if (!strncasecmp(line, own[i], strlen(own[i]))) skip = 1;
+        if (!skip && n + len < cap) { memcpy(out + n, line, len); n += len; out[n] = 0; }
+        line += len;
+    }
+    return n;
+}
+/* The body length a response announces (Content-Length) in its header block, or -1. */
+static long long response_length(const char *buf, size_t header_end) {
+    for (const char *line = strstr(buf, "\r\n"); line && (size_t)(line - buf) < header_end; line = strstr(line + 2, "\r\n"))
+        if (!strncasecmp(line + 2, "Content-Length:", 15)) return strtoll(line + 17, NULL, 10);
+    return -1;
+}
 static int32_t http_perform(int id, const void *body, uint64_t size) {
     Http *h = http_get(id); if (!h) return (int32_t)0x80431022;
-    /* scheme://host[:port]/path; the server's plain-HTTP listener has the URL's port. */
+    /* scheme://host[:port]/path; the server's plain-HTTP listener has the URL's port.
+     * Overtime online: https:// is TLS to the host itself on the URL's port. */
     const char *url = h->url, *p = strstr(url, "://");
     const int https_scheme = !strncmp(url, "https", 5);
     p = p ? p + 3 : url;
@@ -1094,35 +1283,64 @@ static int32_t http_perform(int id, const void *body, uint64_t size) {
         LOG("http %d: cannot reach the online server on port %d", id, port);
         return (int32_t)0x80431063;
     }
+    HttpLink link = {.s = s};
+    if (overtime && https_scheme) {
+        struct in_addr literal;
+        char reason[160] = "";
+        link.tls = runtime_tls_open((uintptr_t)s, inet_pton(AF_INET, host, &literal) == 1 ? NULL : host, reason, sizeof reason);
+        if (!link.tls) {
+            close_socket(s);
+            LOG("http %d: TLS to %s:%d failed: %s", id, host, port, reason);
+            return (int32_t)0x80431063;
+        }
+    }
     char head[4096];
-    char psn_name[20]; online_id(psn_name);
-    /* Metadata for our local PSN replacement. It binds OAuth and Blaze to the
-     * same simulated account without relying on the TCP peer's IP (NAT). */
-    const int n = snprintf(head, sizeof head, "%s %s HTTP/1.0\r\nHost: %s\r\n%s"
-        "X-UFC3-Psn-Id: %llu\r\nX-UFC3-Online-Id: %s\r\nContent-Length: %llu\r\nConnection: close\r\n\r\n",
-        h->method, path, host, h->headers, (unsigned long long)account_id(), psn_name,
-        (unsigned long long)(body ? size : 0));
-    if (n < 0 || (size_t)n >= sizeof head || http_send_all(s, head, (uint64_t)n) ||
-        (body && size && http_send_all(s, body, size))) {
-        close_socket(s);
+    int n;
+    if (overtime) {
+        char headers[sizeof h->headers];
+        game_headers(h->headers, headers, sizeof headers);
+        n = snprintf(head, sizeof head, "%s %s HTTP/1.0\r\nHost: %s\r\n%sContent-Length: %llu\r\nConnection: close\r\n\r\n",
+                     h->method, path, host, headers, (unsigned long long)(body ? size : 0));
+    } else {
+        char psn_name[20]; online_id(psn_name);
+        /* Metadata for our local PSN replacement. It binds OAuth and Blaze to the
+         * same simulated account without relying on the TCP peer's IP (NAT). */
+        n = snprintf(head, sizeof head, "%s %s HTTP/1.0\r\nHost: %s\r\n%s"
+            "X-UFC3-Psn-Id: %llu\r\nX-UFC3-Online-Id: %s\r\nContent-Length: %llu\r\nConnection: close\r\n\r\n",
+            h->method, path, host, h->headers, (unsigned long long)account_id(), psn_name,
+            (unsigned long long)(body ? size : 0));
+    }
+    if (n < 0 || (size_t)n >= sizeof head || link_send(&link, head, (uint64_t)n) ||
+        (body && size && link_send(&link, body, size))) {
+        link_close(&link);
         return (int32_t)0x80431063;
     }
+    /* Overtime online: roster files are larger than UFC's answers. */
+    const size_t limit = overtime ? 64u * 1024 * 1024 : 2u * 1024 * 1024;
     size_t cap = 65536, used = 0; char *buf = malloc(cap);
-    if (!buf) { close_socket(s); return (int32_t)0x80431022; }
+    if (!buf) { link_close(&link); return (int32_t)0x80431022; }
+    long long expected = -1; /* header + body bytes of a response with Content-Length (Overtime online) */
     for (;;) {
         if (used + 4096 > cap) {
-            if (cap >= 2 * 1024 * 1024) { free(buf); close_socket(s); return (int32_t)0x80431022; }
+            if (cap >= limit) { free(buf); link_close(&link); return (int32_t)0x80431022; }
             cap *= 2;
             char *grown = realloc(buf, cap);
-            if (!grown) { free(buf); close_socket(s); return (int32_t)0x80431022; }
+            if (!grown) { free(buf); link_close(&link); return (int32_t)0x80431022; }
             buf = grown;
         }
-        const long r = recv(s, buf + used, (int)(cap - used - 1), 0);
-        if (r < 0) { free(buf); close_socket(s); return (int32_t)0x80431063; }
+        const long r = link_recv(&link, buf + used, cap - used - 1);
+        if (r < 0) { free(buf); link_close(&link); return (int32_t)0x80431063; }
         if (r == 0) break;
         used += (size_t)r;
+        if (overtime && expected < 0) {
+            buf[used] = 0;
+            char *end = strstr(buf, "\r\n\r\n");
+            const long long length = end ? response_length(buf, (size_t)(end - buf) + 2) : -1;
+            if (length >= 0) expected = (long long)(end - buf) + 4 + length;
+        }
+        if (expected >= 0 && (long long)used >= expected) break; /* a server that keeps the connection open */
     }
-    close_socket(s);
+    link_close(&link);
     buf[used] = 0;
     h->response = buf; h->response_size = used;
     char *end = strstr(buf, "\r\n\r\n");
@@ -1192,7 +1410,9 @@ static ABI int32_t http_status(int id, int *status) {
     const int32_t error = http_ready_error(h, id);
     /* UFC's ProtoHttpPS4 explicitly retries BEFORE_SEND while waiting for the status line;
      * it treats EAGAIN here as fatal (guest +0x131499a). Body reads still use EAGAIN. */
-    if (error) return (uint32_t)error == 0x80431082 ? (int32_t)0x80431065 : error;
+    /* NHL 19 with the Overtime patches waits for EAGAIN here (the ProtoHttp block of
+     * NHL19-Overtime-Online.xml), as the console answers. */
+    if (error) return (uint32_t)error == 0x80431082 && !overtime ? (int32_t)0x80431065 : error;
     h = http_get(id); if (!h) return (int32_t)0x80431022;
     *status = h->status;
     LOG("http %d: status %d asked", id, h->status);

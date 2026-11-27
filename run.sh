@@ -77,6 +77,9 @@ echo "Game profile: $BB_GAME_PROFILE ($title $app_version), modules: $modules"
 #  - 60 FPS throughout at a 60 Hz vblank (BB_FLIP_RATE=-1: the game's own 30 in matches).
 #  - its own intro videos; command-buffer copies left to the runtime's default (as on Windows).
 if [[ $BB_GAME_PROFILE == nhl19 ]]; then
+    # Overtime online (BB_ONLINE_PROFILE=overtime): the Overtime servers (BB_OVERTIME_HOST, default
+    # ot.puckpeak.com) with the Overtime patch set (patches.py reads the same variables).
+    [[ ${BB_ONLINE_PROFILE:-} == overtime ]] && export BB_ONLINE_SERVER=${BB_OVERTIME_HOST:-ot.puckpeak.com}
     [[ -n ${BB_ONLINE_SERVER+set} ]] || export BB_ONLINE_SERVER=127.0.0.1
     export BB_READBACKS=${BB_READBACKS:-2} BB_READBACK_LINEAR=${BB_READBACK_LINEAR:-1} BB_GPU_WRITE_TWINS=${BB_GPU_WRITE_TWINS:-0}
     export BB_WRITE_WINDOW=${BB_WRITE_WINDOW:-0} BB_WRITE_STEP=${BB_WRITE_STEP:-0} BB_PREUPLOAD=${BB_PREUPLOAD:-1}

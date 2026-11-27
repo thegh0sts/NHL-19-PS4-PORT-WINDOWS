@@ -145,6 +145,20 @@ class GameCheckError(Exception):
     """Game files bbport does not run (game_check.py)."""
 
 
+PS4_PAGE = 0x4000
+
+
+def mapped_size(p, loads, size):
+    """A load segment's size as the PS4 maps it (16 KiB pages): an executable segment runs to the end
+    of its last page, short of the next segment and the image end. Game patches put code caves in
+    that padding (NHL 19's R1, T1, C32 and cross-vendor patches); shadPS4 maps it too."""
+    end = p['vaddr'] + p['memsz']
+    if p['flags'] & 1:
+        later = [q['vaddr'] for q in loads if q is not p and q['vaddr'] >= end]
+        end = min([(end + PS4_PAGE - 1) & ~(PS4_PAGE - 1), size] + later)
+    return end - p['vaddr']
+
+
 def prepare(game, out):
     source = (game / 'eboot.bin').read_bytes()
     elf, header, ph, segments, missing = parse_self(source)
@@ -239,7 +253,7 @@ def prepare(game, out):
         f.write(struct.pack('<8sQQQQQQ', b'BBPROBE2', size, header[4], len(loads), len(relocs), len(names),
                             int(libc_evidence['init_env_is_ret'])))
         for p in loads:
-            f.write(struct.pack('<QQQ', p['vaddr'], p['memsz'], p['flags']))
+            f.write(struct.pack('<QQQ', p['vaddr'], mapped_size(p, loads, size), p['flags']))
         for name in names:
             encoded = name.encode()
             if len(encoded) >= 128:

@@ -75,6 +75,26 @@ class ExternalPatchTests(unittest.TestCase):
             self.assertEqual(blob[24:], struct.pack('<QQ', 0x10, 1) + b'\x90')
 
 
+class SegmentTests(unittest.TestCase):
+    def test_executable_segment_runs_to_its_page_end(self):
+        # NHL 19 1.60's layout: text ends at 0x56ea4b0, the next segment starts at 0x56ec000; patch code caves sit
+        # in between (the loader maps that padding, prepare.py mapped_size).
+        heads = [(1, 5, 0x56ea4b0 - 0x0, 0), (0x61000010, 4, 0x278000, 0x56ec000), (1, 6, 0x9bb060, 0x5964000),
+                 (1, 6, 0x100, 0x7000000 - 0x10)]
+        elf = bytearray(64 + 56 * len(heads))
+        struct.pack_into('<Q', elf, 0x20, 64)
+        struct.pack_into('<HH', elf, 0x36, 56, len(heads))
+        for i, (kind, flags, memsz, vaddr) in enumerate(heads):
+            struct.pack_into('<IIQQQQQQ', elf, 64 + 56 * i, kind, flags, 0, vaddr, vaddr, 0, memsz, 0x4000)
+        self.assertEqual(eboot_segments(bytes(elf)), [(0, 0x56ec000), (0x5964000, 0x5964000 + 0x9bb060),
+                                                      (0x7000000 - 0x10, 0x7000000 - 0x10 + 0x100)])
+        # Short of the next segment, and of the image end.
+        struct.pack_into('<IIQQQQQQ', elf, 64 + 56, 0x61000010, 4, 0, 0x56eb000, 0x56eb000, 0, 0x100, 0x4000)
+        self.assertEqual(eboot_segments(bytes(elf))[0], (0, 0x56eb000))
+        struct.pack_into('<IIQQQQQQ', elf, 64 + 56 * 3, 1, 5, 0, 0x7000000, 0x7000000, 0, 0x10, 0x4000)
+        self.assertEqual(eboot_segments(bytes(elf))[-1], (0x7000000, 0x7000010))
+
+
 def tiny_elf(code, vaddr=0x1000, offset=0x100):
     """An ELF64 header with one load segment holding code at vaddr (file offset offset)."""
     elf = bytearray(offset) + code
@@ -161,6 +181,149 @@ class GamePatchTests(unittest.TestCase):
             ini.write_text('# comment\npatch_60fps=1\nfps_counter = 0\n')
             self.assertEqual(read_settings(ini), {'patch_60fps': '1', 'fps_counter': '0'})
             self.assertEqual(read_settings(Path(tmp) / 'missing.ini'), {})
+
+
+LOCAL_RESOLUTION = """<?xml version="1.0"?>
+<Patch>
+  <Metadata Name="Resolution 2560x1440 (Kravickas)" AppVer="01.60" AppElf="eboot.bin" isEnabled="true">
+    <PatchList><Line Type="bytes" Address="0x00500000" Value="0A0B"/></PatchList>
+  </Metadata>
+  <Metadata Name="Something else" AppVer="01.60" AppElf="eboot.bin" isEnabled="true">
+    <PatchList><Line Type="bytes" Address="0x00500010" Value="90"/></PatchList>
+  </Metadata>
+</Patch>
+"""
+
+
+class OvertimeOnlineTests(unittest.TestCase):
+    """The Overtime online set (NHL19-Overtime.xml + NHL19-Overtime-Online.xml) must make Overtime 1.00.0's
+    netplay fingerprint, whatever server the host slots name."""
+
+    def found(self, extra=None):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        folder = Path(tmp.name)
+        for name in ('NHL19-Overtime.xml', 'NHL19-Overtime-Online.xml', 'NHL19-Online.xml'):
+            (folder / name).write_bytes((ROOT / 'patches' / name).read_bytes())
+        if extra:
+            (folder / 'extra.xml').write_text(extra)
+        return external_patches(folder, '01.60', 'CUSA11126'), folder
+
+    def test_set_makes_overtime_fingerprint(self):
+        found, _ = self.found()
+        selected = patches.overtime_selection(found, None)
+        self.assertEqual([key for key, _, _ in selected], [k for k, _, _ in found if k in patches.OVERTIME_ONLINE_PATCHES])
+        self.assertEqual(len(selected), len(patches.OVERTIME_ONLINE_PATCHES))
+        self.assertEqual(patches.netplay_fingerprint(selected), patches.OVERTIME_ONLINE_FINGERPRINT)
+        # Every file of the set is off by default: the default profile applies none of the online blocks.
+        default = {key for key, _, _ in external_selection(found, None)}
+        self.assertFalse({k for k in patches.OVERTIME_ONLINE_PATCHES if k.startswith('NHL19-Overtime-Online.xml/')} & default)
+        writes = compile_external(selected, [(0, 0x7000000)], strict=True)
+        self.assertTrue(writes)
+
+    def test_host_slots_do_not_change_the_fingerprint(self):
+        found, _ = self.found()
+        selected = patches.overtime_selection(found, None)
+        patches.set_overtime_host(selected, '192.168.1.15')
+        self.assertEqual(patches.netplay_fingerprint(selected), patches.OVERTIME_ONLINE_FINGERPRINT)
+        values = {line.get('Address'): bytes.fromhex(line.get('Value'))
+                  for _, _, meta in selected for line in meta.iter('Line')}
+        self.assertEqual(values['0x51DCCFF'], b'192.168.1.15\0')
+        for addr, _ in patches.OVERTIME_NUCLEUS_SLOTS:
+            self.assertEqual(values[addr], b'https://192.168.1.15/\0')
+
+    def test_long_host_needs_a_short_base_url(self):
+        found, _ = self.found()
+        selected = patches.overtime_selection(found, None)
+        with self.assertRaises(ValueError):
+            patches.set_overtime_host(selected, 'overtime-dev.example.org')  # https://.../ is 29 characters
+        patches.set_overtime_host(selected, 'overtime-dev.example.org', 'https://10.0.0.2/')
+        values = {line.get('Address'): bytes.fromhex(line.get('Value'))
+                  for _, _, meta in selected for line in meta.iter('Line')}
+        self.assertEqual(values['0x51DCCFF'], b'overtime-dev.example.org\0')
+        self.assertEqual(values['0x526E089'], b'https://10.0.0.2/\0')
+        for bad in ('', 'a b', 'x--y', '-host', 'host/'):
+            with self.assertRaises(ValueError):
+                patches.set_overtime_host(selected, bad)
+        with self.assertRaises(ValueError):
+            patches.set_overtime_host(selected, 'host', 'ftp://x/')
+
+    def test_launcher_choices_keep_only_local_patches(self):
+        found, folder = self.found(LOCAL_RESOLUTION)
+        config = folder / 'patches.json'
+        config.write_text(json.dumps({'enabled': ['NHL19-Online.xml/Blaze console login (login_with_nucleussdk off)'],
+                                      'disabled': list(patches.OVERTIME_ONLINE_PATCHES)}))
+        selected = patches.overtime_selection(found, config)
+        keys = [key for key, _, _ in selected]
+        self.assertIn('extra.xml/Resolution 2560x1440 (Kravickas)', keys)
+        self.assertNotIn('extra.xml/Something else', keys)
+        self.assertNotIn('NHL19-Online.xml/Blaze console login (login_with_nucleussdk off)', keys)
+        for key in patches.OVERTIME_ONLINE_PATCHES:
+            self.assertIn(key, keys)  # patches.json cannot turn the set off
+        self.assertEqual(patches.netplay_fingerprint(selected), patches.OVERTIME_ONLINE_FINGERPRINT)
+
+    def test_missing_or_failing_patch_is_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / 'NHL19-Overtime.xml').write_bytes((ROOT / 'patches' / 'NHL19-Overtime.xml').read_bytes())
+            with self.assertRaises(ValueError):
+                patches.overtime_selection(external_patches(Path(tmp), '01.60', 'CUSA11126'), None)
+        found, _ = self.found()
+        selected = patches.overtime_selection(found, None)
+        with self.assertRaises(ValueError):
+            compile_external(selected, [(0, 0x1000)], strict=True)
+        self.assertEqual(compile_external(selected, [(0, 0x1000)]), [])
+
+    def test_fingerprint_rule(self):
+        # Line order, comments and case do not count; local-only patches and host slots do not count.
+        import xml.etree.ElementTree as ET
+        def meta(name, *lines):
+            m = ET.fromstring(f'<Metadata Name="{name}"><PatchList>' + ''.join(
+                f'<Line Type="bytes" Address="{a}" Value="{v}"/>' for a, v in lines) + '</PatchList></Metadata>')
+            return ('f.xml/' + name, None, m)
+        a = [meta('A', ('0x500000', '90'), ('0x500010', 'ab'))]
+        b = [meta('A', ('0x500010', 'AB'), ('0x500000', '90')), meta('60 FPS replays (Kravickas)', ('0x600000', '01')),
+             meta('Host', ('0x51dccff', '6100'))]
+        self.assertEqual(patches.netplay_fingerprint(a), patches.netplay_fingerprint(b))
+        import hashlib
+        self.assertEqual(patches.netplay_fingerprint(a), hashlib.sha256(b'0X500000=90\n0X500010=AB').hexdigest()[:20])
+
+    def test_main_writes_fingerprint_and_fails_whole(self):
+        import subprocess
+        import sys
+        elf = tiny_elf(b'\0' * 0x100, vaddr=0)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            (out / 'eboot.elf').write_bytes(elf)
+            env = dict(__import__('os').environ, BB_ONLINE_PROFILE='overtime')
+            run = subprocess.run([sys.executable, str(ROOT / 'scripts' / 'patches.py'), '--patches-dir', str(ROOT / 'patches'),
+                                  '--app-version', '01.60', '--title-id', 'CUSA11126', '--out', str(out),
+                                  '--settings', str(out / 'none.ini')], env=env, capture_output=True, text=True)
+            # The set's addresses lie outside this tiny eboot: an error, and no blob or fingerprint left behind.
+            self.assertNotEqual(run.returncode, 0)
+            self.assertIn('Overtime online', run.stderr)
+            self.assertFalse((out / 'patches.bin').exists())
+            self.assertFalse((out / 'netplay_fingerprint.txt').exists())
+            env['BB_ONLINE_PROFILE'] = ''
+            run = subprocess.run([sys.executable, str(ROOT / 'scripts' / 'patches.py'), '--patches-dir', str(ROOT / 'patches'),
+                                  '--app-version', '01.60', '--title-id', 'CUSA11126', '--out', str(out),
+                                  '--settings', str(out / 'none.ini')], env=env, capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertTrue((out / 'patches.bin').exists())
+            self.assertRegex((out / 'netplay_fingerprint.txt').read_text(), r'^[0-9a-f]{20}\n$')
+
+    def test_prepared_game_takes_the_whole_set(self):
+        # With a prepared NHL 19 1.60 in out/ (skipped otherwise): every write of the set lands in the eboot.
+        elf_path = ROOT / 'out' / 'eboot.elf'
+        if not elf_path.is_file():
+            self.skipTest('no prepared game in out/')
+        elf = elf_path.read_bytes()
+        found, _ = self.found()
+        selected = patches.overtime_selection(found, None)
+        try:
+            writes = compile_external(selected, eboot_segments(elf), elf, strict=True)
+        except ValueError as error:
+            self.skipTest(f'out/ holds another game ({error})')
+        self.assertEqual(len(writes), sum(len(list(m.iter('Line'))) for _, _, m in selected))
 
 
 if __name__ == '__main__':
