@@ -59,18 +59,35 @@ void runtime_set_main_tls(const void *data, uint64_t filesz, uint64_t memsz, uin
 void runtime_thread_attach_main(void);
 /* ufc3 online (UFC-25, runtime_fp.c): BB_DETERMINISTIC_FP (default: on with BB_ONLINE_SERVER).
  * The guest's approximate reciprocals are patched to a rule that is the same on every CPU, and
- * guest threads get the PS4's MXCSR (0x9fc0) and x87 control word (0x037f). */
-int runtime_fp_deterministic(void);
+ * guest threads get the PS4's MXCSR (0x9fc0) and x87 control word (0x037f).
+ * NHL 19 Overtime online (BB_ONLINE_PROFILE=overtime) uses shadPS4's rule instead: native on AMD
+ * and other CPUs, shadPS4's AMD tables on Intel; guest threads always get Orbis' MXCSR. */
+typedef enum {
+    RUNTIME_FP_NATIVE,      /* the CPU's own rcp/rsqrt */
+    RUNTIME_FP_EXACT,       /* BB_DETERMINISTIC_FP's rule (runtime_fp_rcp / runtime_fp_rsqrt) */
+    RUNTIME_FP_AMD_TABLES,  /* Overtime online on Intel: the estimate XOR shadPS4's AMD delta */
+    RUNTIME_FP_ZERO_TABLES, /* the same lookup with zero deltas: equals native (tests only) */
+} RuntimeFpRule;
+/* The rule from the settings: overtime (BB_ONLINE_PROFILE=overtime), BB_DETERMINISTIC_FP, BB_ONLINE_SERVER,
+ * whether the CPU is Intel's, and BB_OVERTIME_FP (native, tables or zero: a test override). */
+RuntimeFpRule runtime_fp_rule_for(int overtime, const char *deterministic, const char *server, int intel, const char *force);
+RuntimeFpRule runtime_fp_rule(void); /* from the environment and this CPU, logged once */
+int runtime_fp_cpu_intel(void);      /* CPUID vendor GenuineIntel (shadPS4's test) */
+int runtime_fp_deterministic(void);  /* guest threads get Orbis' MXCSR and x87 control word */
 void runtime_fp_thread_setup(void);
 uint32_t runtime_fp_rcp(uint32_t x);
 uint32_t runtime_fp_rsqrt(uint32_t x);
+/* shadPS4's AMD tables (src/runtime_fp_amd.h): the 2^21-entry index table (NULL: no memory) and the xor values. */
+const uint8_t *runtime_fp_amd_index(int rsqrt);
+const uint32_t *runtime_fp_amd_xor(int rsqrt, unsigned *count);
 typedef struct { uint64_t functions, found, patched, unpatched, displaced, stub_bytes; } RuntimeFpStats;
-/* Patches every (v)rcpps/(v)rsqrtps/(v)rcpss/(v)rsqrtss in the executable segments; `pointers`
- * are image offsets of code addresses stored in data (they are never displaced). `map_near`
- * gives writable memory within 2 GiB of the image; it is made executable here. */
+/* Patches every (v)rcpps/(v)rsqrtps/(v)rcpss/(v)rsqrtss in the executable segments to `rule` (the
+ * table rules leave the scalar forms alone, as shadPS4 does); `pointers` are image offsets of code
+ * addresses stored in data (they are never displaced). `map_near` gives writable memory within
+ * 2 GiB of the image; it is made executable here. */
 uint64_t runtime_fp_patch_image(unsigned char *image, uint64_t size, const uint64_t *seg_address, const uint64_t *seg_size,
                                 const uint64_t *seg_flags, uint64_t segments, const uint64_t *pointers, uint64_t pointer_count,
-                                void *(*map_near)(size_t), RuntimeFpStats *stats);
+                                void *(*map_near)(size_t), RuntimeFpRule rule, RuntimeFpStats *stats);
 /* Windows: guest red-zone accesses moved 64 KiB lower (exception frames overwrite the red zone).
  * RuntimeFpStats: found/patched/unpatched accesses, displaced = switch-table entries seen. */
 int runtime_redzone_enabled(void);

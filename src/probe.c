@@ -928,8 +928,14 @@ int main(int argc, char **argv) {
                (double)(platform_monotonic_ns() - start) / 1e6);
         free(addresses); free(sizes); free(flags); free(pointers);
     }
-    /* ufc3 online (UFC-25): approximate reciprocals that give the same bits on every CPU. */
-    if (runtime_fp_deterministic()) {
+    /* ufc3 online (UFC-25): approximate reciprocals that give the same bits on every CPU. NHL 19
+     * Overtime online: shadPS4's rule (native, or AMD's results on Intel). */
+    const RuntimeFpRule fp_rule = runtime_fp_rule();
+    const int fp_overtime = getenv("BB_ONLINE_PROFILE") && !strcmp(getenv("BB_ONLINE_PROFILE"), "overtime");
+    if (fp_overtime && fp_rule == RUNTIME_FP_NATIVE)
+        printf("Overtime FP: %s CPU: rcp/rsqrt run natively, as on Overtime's shadPS4; guest threads use MXCSR 0x9fc0\n",
+               runtime_fp_cpu_intel() ? "Intel" : "AMD or other");
+    if (fp_rule != RUNTIME_FP_NATIVE) {
         uint64_t *addresses = calloc(ns, sizeof(uint64_t)), *sizes = calloc(ns, sizeof(uint64_t)), *flags = calloc(ns, sizeof(uint64_t));
         uint64_t *pointers = calloc(nr ? nr : 1, sizeof(uint64_t)), pointer_count = 0;
         if (!addresses || !sizes || !flags || !pointers) fail("allocation failed");
@@ -937,10 +943,17 @@ int main(int argc, char **argv) {
         for (uint64_t i = 0; i < nr; ++i) if (!relocs[i].kind) pointers[pointer_count++] = relocs[i].value;
         RuntimeFpStats fp;
         const uint64_t start = platform_monotonic_ns();
-        runtime_fp_patch_image(image, size, addresses, sizes, flags, ns, pointers, pointer_count, map_near_image, &fp);
-        printf("Deterministic FP (BB_DETERMINISTIC_FP): %" PRIu64 " of %" PRIu64 " rcp/rsqrt instructions patched in %" PRIu64 " functions "
-               "(%" PRIu64 " kept as the CPU computes them), %" PRIu64 " KiB of stubs, %.0f ms; guest threads use MXCSR 0x9fc0\n",
-               fp.patched, fp.found, fp.functions, fp.unpatched, fp.stub_bytes / 1024, (double)(platform_monotonic_ns() - start) / 1e6);
+        runtime_fp_patch_image(image, size, addresses, sizes, flags, ns, pointers, pointer_count, map_near_image, fp_rule, &fp);
+        if (fp_rule == RUNTIME_FP_EXACT)
+            printf("Deterministic FP (BB_DETERMINISTIC_FP): %" PRIu64 " of %" PRIu64 " rcp/rsqrt instructions patched in %" PRIu64 " functions "
+                   "(%" PRIu64 " kept as the CPU computes them), %" PRIu64 " KiB of stubs, %.0f ms; guest threads use MXCSR 0x9fc0\n",
+                   fp.patched, fp.found, fp.functions, fp.unpatched, fp.stub_bytes / 1024, (double)(platform_monotonic_ns() - start) / 1e6);
+        else
+            printf("Overtime FP: %s CPU: %" PRIu64 " of %" PRIu64 " rcpps/rsqrtps instructions patched to shadPS4's %s in %" PRIu64
+                   " functions (%" PRIu64 " kept, each listed above), %" PRIu64 " KiB of stubs, %.0f ms; guest threads use MXCSR 0x9fc0\n",
+                   runtime_fp_cpu_intel() ? "Intel" : "AMD or other", fp.patched, fp.found,
+                   fp_rule == RUNTIME_FP_AMD_TABLES ? "AMD tables" : "table path with zero deltas (BB_OVERTIME_FP=zero)", fp.functions,
+                   fp.unpatched, fp.stub_bytes / 1024, (double)(platform_monotonic_ns() - start) / 1e6);
         free(addresses); free(sizes); free(flags); free(pointers);
     }
     game_log_install(image, segments, ns);
