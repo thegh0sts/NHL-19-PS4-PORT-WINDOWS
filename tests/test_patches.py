@@ -73,6 +73,24 @@ class ExternalPatchTests(unittest.TestCase):
             blob = (Path(tmp) / 'patches.bin').read_bytes()
             self.assertEqual(blob[:24], struct.pack('<8sQQ', b'BBPATCH2', EBOOT_BASE, 1))
             self.assertEqual(blob[24:], struct.pack('<QQ', 0x10, 1) + b'\x90')
+class SegmentTests(unittest.TestCase):
+    def test_executable_segment_runs_to_its_page_end(self):
+        # NHL 19 1.60's layout: text ends at 0x56ea4b0, the next segment starts at 0x56ec000; patch code caves sit
+        # in between (the loader maps that padding, prepare.py mapped_size).
+        heads = [(1, 5, 0x56ea4b0 - 0x0, 0), (0x61000010, 4, 0x278000, 0x56ec000), (1, 6, 0x9bb060, 0x5964000),
+                 (1, 6, 0x100, 0x7000000 - 0x10)]
+        elf = bytearray(64 + 56 * len(heads))
+        struct.pack_into('<Q', elf, 0x20, 64)
+        struct.pack_into('<HH', elf, 0x36, 56, len(heads))
+        for i, (kind, flags, memsz, vaddr) in enumerate(heads):
+            struct.pack_into('<IIQQQQQQ', elf, 64 + 56 * i, kind, flags, 0, vaddr, vaddr, 0, memsz, 0x4000)
+        self.assertEqual(eboot_segments(bytes(elf)), [(0, 0x56ec000), (0x5964000, 0x5964000 + 0x9bb060),
+                                                      (0x7000000 - 0x10, 0x7000000 - 0x10 + 0x100)])
+        # Short of the next segment, and of the image end.
+        struct.pack_into('<IIQQQQQQ', elf, 64 + 56, 0x61000010, 4, 0, 0x56eb000, 0x56eb000, 0, 0x100, 0x4000)
+        self.assertEqual(eboot_segments(bytes(elf))[0], (0, 0x56eb000))
+        struct.pack_into('<IIQQQQQQ', elf, 64 + 56 * 3, 1, 5, 0, 0x7000000, 0x7000000, 0, 0x10, 0x4000)
+        self.assertEqual(eboot_segments(bytes(elf))[-1], (0x7000000, 0x7000010))
 
 
 def tiny_elf(code, vaddr=0x1000, offset=0x100):

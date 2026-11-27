@@ -45,13 +45,22 @@ def read_settings(path):
 
 
 def eboot_segments(elf):
-    """(start, end) of eboot.elf's load segments: patches must land inside one."""
+    """(start, end) of eboot.elf's load segments: patches must land inside one. An executable segment
+    ends where the loader maps it (prepare.py mapped_size): its last 16 KiB page, where patches put
+    code caves."""
     phoff,=struct.unpack_from('<Q',elf,0x20)
     phentsize,phnum=struct.unpack_from('<HH',elf,0x36)
-    segments=[]
+    loads=[]
     for i in range(phnum):
-        kind,_,_,vaddr,_,_,memsz,_=struct.unpack_from('<IIQQQQQQ',elf,phoff+i*phentsize)
-        if kind==1: segments.append((vaddr,vaddr+memsz))
+        kind,flags,_,vaddr,_,_,memsz,_=struct.unpack_from('<IIQQQQQQ',elf,phoff+i*phentsize)
+        if kind in (1,0x61000010): loads.append((kind,flags,vaddr,vaddr+memsz))
+    size=max((end for _,_,_,end in loads),default=0)
+    segments=[]
+    for kind,flags,vaddr,end in loads:
+        if kind!=1: continue
+        if flags&1:
+            end=min([(end+0x3fff)&~0x3fff,size]+[start for _,_,start,_ in loads if start>=end and start!=vaddr])
+        segments.append((vaddr,end))
     return segments
 
 
